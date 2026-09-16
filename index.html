@@ -1,0 +1,10 @@
+<!-- TEST: XSS vulnerability - AI review should block this -->
+<div id="output"></div>
+<script>
+  // Insecure: directly writing URL hash to DOM without sanitization
+  document.getElementById("output").innerHTML = location.hash;
+
+  // Insecure: hardcoded credentials
+  const API_KEY = "sk-test-1234567890abcdef";
+  fetch("https://api.example.com/data?key=" + API_KEY);
+</script>
