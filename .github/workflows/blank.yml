@@ -151,6 +151,16 @@ jobs:
       # bot's unique name so it gets appended to the endpoint as a query param.
       CLIQ_BOT_UNIQUE_NAME: ${{ vars.CLIQ_BOT_UNIQUE_NAME }}
 
+      # USER CONFIG (repository variable): CLIQ_USER_MODE_BOT_DISPLAY_NAME
+      # Optional override for user-mode messages. If not set, the workflow uses the
+      # default display name: "GitHub Informer for Zoho Cliq".
+      CLIQ_USER_MODE_BOT_DISPLAY_NAME: ${{ vars.CLIQ_USER_MODE_BOT_DISPLAY_NAME }}
+
+      # USER CONFIG (repository variable): CLIQ_USER_MODE_BOT_IMAGE_URL
+      # Optional override for user-mode messages. If not set, the workflow uses the
+      # default image URL fallback.
+      CLIQ_USER_MODE_BOT_IMAGE_URL: ${{ vars.CLIQ_USER_MODE_BOT_IMAGE_URL }}
+
       # USER CONFIG (repository variable): CLIQ_THREAD_STORAGE_MODE
       # Optional. Set to "project" only when you want PR updates to keep the
       # same Cliq thread using a GitHub Project V2 field. If it is not enabled,
@@ -451,7 +461,7 @@ jobs:
           echo "PR inserted into project table successfully."
 
       - if: ${{ github.event_name != 'pull_request' && github.event_name != 'pull_request_target' }}
-        uses: Lincy-Zoho/GitHub-Informer-New@v6.4.3
+        uses: Lincy-Zoho/GitHub-Informer-New@v6.4.4
         env:
           # Use workflow token for repo/PR APIs; use PROJECT_TOKEN only for ProjectV2 operations.
           GITHUB_TOKEN: ${{ github.token }}
@@ -627,7 +637,7 @@ jobs:
           echo "token_present=${{ secrets.GITHUB_TOKEN != '' }}"
 
       - if: ${{ github.event_name == 'pull_request_target' }}
-        uses: Lincy-Zoho/GitHub-Informer-New@v6.4.3
+        uses: Lincy-Zoho/GitHub-Informer-New@v6.4.4
         env:
           # Use workflow token for repo/PR APIs; use PROJECT_TOKEN only for ProjectV2 operations.
           GITHUB_TOKEN: ${{ github.token }}
