@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Modern Login</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link
+    href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap"
+    rel="stylesheet"
+>
+<div class="card"> <h2>Connect To Service</h2> <button onclick="connectToService()"> Connect </button> <p id="apiStatus"></p> </div>
+    
+
+<style>
+
+*{
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: Poppins, sans-serif;
+}
+
+body {
+    min-height: 100vh;
+
+    display: flex;
+    justify-content: center;
+    align-items: center;
+
+    padding: 20px;
+
+    background: linear-gradient(
+        135deg,
+        #4f46e5,
+        #06b6d4,
+        #8b5cf6
+    );
+
+    background-size: 300% 300%;
+
+    animation: bg 12s infinite;
+}
+
+@keyframes bg {
+
+    0%,
+    100% {
+        background-position: 0 50%;
+    }
+
+    50% {
+        background-position: 100% 50%;
+    }
+}
+
+.card {
+    width: 420px;
+    max-width: 100%;
+
+    padding: 40px;
+
+    border-radius: 24px;
+
+    background: rgba(255, 255, 255, .12);
+
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+
+    border: 1px solid rgba(255, 255, 255, .2);
+
+    box-shadow: 0 20px 50px rgba(0, 0, 0, .25);
+
+    transition:
+        transform .3s ease,
+        box-shadow .3s ease;
+}
+
+.card:hover {
+    transform: translateY(-3px);
+
+    box-shadow:
+        0 25px 60px rgba(0, 0, 0, .3);
+}
+
+.logo {
+    width: 80px;
+    height: 80px;
+
+    margin: auto;
+
+    border-radius: 50%;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    background: #fff;
+
+    font-size: 34px;
+
+    box-shadow: 0 8px 20px rgba(0, 0, 0, .15);
+}
+
+h2,
+.subtitle {
+    text-align: center;
+    color: #fff;
+}
+
+h2 {
+    margin: 20px 0 8px;
+    font-size: 24px;
+}
+
+.subtitle {
+    opacity: .9;
+
+    margin-bottom: 30px;
+
+    font-size: 14px;
+}
+
+.field {
+    margin-bottom: 18px;
+
+    position: relative;
+}
+
+.field-icon {
+    position: absolute;
+
+    left: 16px;
+    top: 50%;
+
+    transform: translateY(-50%);
+
+    font-size: 17px;
+
+    pointer-events: none;
+}
+
+input[type="email"],
+input[type="password"],
+input[type="text"] {
+    width: 100%;
+
+    padding: 15px 48px 15px 45px;
+
+    border: none;
+    border-radius: 12px;
+
+    background: rgba(255, 255, 255, .18);
+
+    color: #fff;
+
+    font-size: 15px;
+
+    transition:
+        background .2s,
+        outline .2s;
+}
+
+input::placeholder {
+    color: #eee;
+}
+
+input:focus {
+    outline: 2px solid rgba(255, 255, 255, .45);
+
+    background: rgba(255, 255, 255, .23);
+}
+
+input:invalid:not(:placeholder-shown) {
+    outline: 2px solid rgba(255, 120, 120, .7);
+}
+
+.eye {
+    position: absolute;
+
+    right: 16px;
+    top: 50%;
+
+    transform: translateY(-50%);
+
+    cursor: pointer;
+
+    color: #fff;
+
+    user-select: none;
+}
+
+.eye:focus {
+    outline: 2px solid rgba(255, 255, 255, .6);
+
+    border-radius: 5px;
+}
+
+.password-strength {
+    margin-top: 8px;
+
+    display: none;
+}
+
+.strength-bar {
+    width: 100%;
+    height: 5px;
+
+    border-radius: 5px;
+
+    background: rgba(255, 255, 255, .2);
+
+    overflow: hidden;
+}
+
+.strength-progress {
+    width: 0;
+    height: 100%;
+
+    border-radius: 5px;
+
+    background: #fff;
+
+    transition:
+        width .3s ease,
+        background .3s ease;
+}
+
+.strength-text {
+    display: block;
+
+    margin-top: 5px;
+
+    color: rgba(255, 255, 255, .85);
+
+    font-size: 11px;
+}
+
+.caps-warning {
+    display: none;
+
+    margin-top: 7px;
+
+    color: #fff;
+
+    font-size: 12px;
+}
+
+.row {
+    display: flex;
+
+    justify-content: space-between;
+    align-items: center;
+
+    color: #fff;
+
+    font-size: 14px;
+
+    margin-bottom: 22px;
+}
+
+.remember {
+    display: flex;
+
+    align-items: center;
+
+    gap: 7px;
+
+    cursor: pointer;
+}
+
+.remember input {
+    width: 15px;
+    height: 15px;
+
+    accent-color: #fff;
+
+    cursor: pointer;
+}
+
+a {
+    color: #fff;
+
+    text-decoration: none;
+
+    transition: .2s;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+.button-group {
+    display: flex;
+
+    gap: 10px;
+}
+
+.login-btn,
+.clear-btn {
+    flex: 1;
+
+    padding: 15px;
+
+    border-radius: 12px;
+
+    font-weight: 700;
+
+    font-size: 16px;
+
+    cursor: pointer;
+
+    transition: .25s;
+}
+
+.login-btn {
+    border: none;
+
+    background: #fff;
+
+    color: #4f46e5;
+}
+
+.login-btn:hover {
+    transform: translateY(-2px);
+
+    box-shadow:
+        0 8px 20px rgba(0, 0, 0, .2);
+}
+
+.login-btn:active {
+    transform: translateY(0);
+}
+
+.login-btn:disabled {
+    opacity: .7;
+
+    cursor: not-allowed;
+
+    transform: none;
+}
+
+.clear-btn {
+    border: 1px solid rgba(255, 255, 255, .3);
+
+    background: rgba(255, 255, 255, .12);
+
+    color: #fff;
+}
+
+.clear-btn:hover {
+    background: rgba(255, 255, 255, .25);
+}
+
+.div {
+    display: flex;
+
+    align-items: center;
+
+    color: #fff;
+
+    margin: 24px 0;
+}
+
+.div::before,
+.div::after {
+    content: "";
+
+    flex: 1;
+
+    height: 1px;
+
+    background: rgba(255, 255, 255, .3);
+}
+
+.div span {
+    padding: 0 12px;
+
+    font-size: 13px;
+}
+
+.social {
+    display: grid;
+
+    grid-template-columns: 1fr 1fr;
+
+    gap: 12px;
+}
+
+.social button {
+    width: 100%;
+
+    padding: 13px;
+
+    border-radius: 12px;
+
+    background: rgba(255, 255, 255, .18);
+
+    color: #fff;
+
+    border: 1px solid rgba(255, 255, 255, .2);
+
+    cursor: pointer;
+
+    font-weight: 500;
+
+    transition: .25s;
+}
+
+.social button:hover {
+    background: rgba(255, 255, 255, .3);
+
+    transform: translateY(-2px);
+}
+
+.message {
+    display: none;
+
+    margin-top: 15px;
+
+    padding: 10px;
+
+    border-radius: 8px;
+
+    text-align: center;
+
+    color: #fff;
+
+    background: rgba(34, 197, 94, .25);
+
+    border: 1px solid rgba(255, 255, 255, .2);
+
+    font-size: 13px;
+}
+
+.footer {
+    text-align: center;
+
+    color: #fff;
+
+    margin-top: 24px;
+
+    font-size: 14px;
+}
+
+.footer a {
+    font-weight: 600;
+}
+
+.copyright {
+    text-align: center;
+
+    color: rgba(255, 255, 255, .7);
+
+    font-size: 11px;
+
+    margin-top: 18px;
+}
+
+@media (max-width: 480px) {
+
+    .card {
+        width: 100%;
+
+        padding: 30px 25px;
+    }
+
+    h2 {
+        font-size: 21px;
+    }
+
+    .social {
+        grid-template-columns: 1fr;
+    }
+
+    .button-group {
+        flex-direction: column;
+    }
+}
+
+/* Respect users who prefer reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+
+    body {
+        animation: none;
+    }
+
+    .card,
+    .login-btn,
+    .social button {
+        transition: none;
+    }
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="card">
+
+    <div class="logo">
+        🔐
+    </div>
+
+    <h2>Welcome Back 👋</h2>
+
+    <p class="subtitle">
+        Sign in to continue
+    </p>
+
+    <form id="loginForm" novalidate>
+
+        <!-- Email -->
+
+        <div class="field">
+
+            <span class="field-icon">
+                📧
+            </span>
+
+            <input
+                type="email"
+                id="email"
+                name="email"
+                placeholder="Email"
+                autocomplete="email"
+                aria-label="Email address"
+                required
+            >
+
+        </div>
+
+        <!-- Password -->
+
+        <div class="field">
+
+            <span class="field-icon">
+                🔒
+            </span>
+
+            <input
+                id="pwd"
+                name="password"
+                type="password"
+                placeholder="Password"
+                autocomplete="current-password"
+                aria-label="Password"
+                required
+                minlength="6"
+            >
+
+            <span
+                class="eye"
+                id="passwordToggle"
+                role="button"
+                tabindex="0"
+                aria-label="Show password"
+                aria-pressed="false"
+                onclick="togglePassword()"
+            >
+                👁️
+            </span>
+
+            <!-- Password Strength -->
+
+            <div
+                class="password-strength"
+                id="passwordStrength"
+            >
+
+                <div class="strength-bar">
+
+                    <div
+                        class="strength-progress"
+                        id="strengthProgress"
+                    ></div>
+
+                </div>
+
+                <span
+                    class="strength-text"
+                    id="strengthText"
+                >
+                    Password strength
+                </span>
+
+            </div>
+
+            <!-- Caps Lock -->
+
+            <div
+                class="caps-warning"
+                id="capsWarning"
+                role="alert"
+            >
+                ⚠️ Caps Lock is ON
+            </div>
+
+        </div>
+
+        <!-- Options -->
+
+        <div class="row">
+
+            <label class="remember">
+
+                <input
+                    type="checkbox"
+                    id="remember"
+                    name="remember"
+                >
+
+                <span>
+                    Remember me
+                </span>
+
+            </label>
+
+            <a href="#">
+                Forgot Password?
+            </a>
+
+        </div>
+
+        <!-- Buttons -->
+
+        <div class="button-group">
+
+            <button
+                type="submit"
+                class="login-btn"
+                id="loginBtn"
+            >
+                Sign In
+            </button>
+
+            <button
+                type="button"
+                class="clear-btn"
+                id="clearBtn"
+            >
+                Clear
+            </button>
+
+        </div>
+
+        <!-- Status Message -->
+
+        <div
+            class="message"
+            id="successMessage"
+            role="status"
+        >
+            ✅ Sign-in successful!
+        </div>
+
+        <!-- Divider -->
+
+        <div class="div">
+            <span>OR</span>
+        </div>
+
+        <!-- Social Login -->
+
+        <div class="social">
+
+            <button type="button">
+                🌐 Google
+            </button>
+
+            <button type="button">
+                🐙 GitHub
+            </button>
+
+        </div>
+
+        <!-- Sign Up -->
+
+        <div class="footer">
+
+            Don't have an account?
+
+            <a href="#">
+                Create an Account here
+            </a>
+
+        </div>
+
+        <div class="copyright">
+            © 2026 Your Application. All rights reserved.
+        </div>
+
+    </form>
+
+</div>
+
+<script>
+
+ 
+/* Password visibility */
+function togglePassword() {
+
+    const password =
+        document.getElementById("pwd");
+
+    const toggle =
+        document.getElementById("passwordToggle");
+
+    const isPassword =
+        password.type === "password";
+
+    password.type =
+        isPassword ? "text" : "password";
+
+    toggle.textContent =
+        isPassword ? "🙈" : "👁️";
+
+    toggle.setAttribute(
+        "aria-label",
+        isPassword
+            ? "Hide password"
+            : "Show password"
+    );
+
+    toggle.setAttribute(
+        "aria-pressed",
+        isPassword
+    );
+}
+
+
+/* Keyboard support for password toggle */
+
+document
+    .getElementById("passwordToggle")
+    .addEventListener("keydown", function(event) {
+
+        if (
+            event.key === "Enter" ||
+            event.key === " "
+        ) {
+
+            event.preventDefault();
+
+            togglePassword();
+        }
+
+    });
+
+
+/* Password strength */
+
+const password =
+    document.getElementById("pwd");
+
+const strengthContainer =
+    document.getElementById("passwordStrength");
+
+const strengthProgress =
+    document.getElementById("strengthProgress");
+
+const strengthText =
+    document.getElementById("strengthText");
+
+password.addEventListener(
+    "input",
+    function() {
+
+        const value = password.value;
+
+        if (!value) {
+
+            strengthContainer.style.display = "none";
+
+            return;
+        }
+
+        strengthContainer.style.display = "block";
+
+        let score = 0;
+
+        if (value.length >= 6) {
+            score++;
+        }
+
+        if (value.length >= 10) {
+            score++;
+        }
+
+        if (/[A-Z]/.test(value)) {
+            score++;
+        }
+
+        if (/[0-9]/.test(value)) {
+            score++;
+        }
+
+        if (/[^A-Za-z0-9]/.test(value)) {
+            score++;
+        }
+
+        const percentage =
+            Math.min(score * 20, 100);
+
+        strengthProgress.style.width =
+            percentage + "%";
+
+        if (score <= 2) {
+
+            strengthText.textContent =
+                "Weak password";
+
+        } else if (score <= 3) {
+
+            strengthText.textContent =
+                "Medium password";
+
+        } else {
+
+            strengthText.textContent =
+                "Strong password";
+
+        }
+
+    }
+);
+
+
+/* Caps Lock detection */
+
+password.addEventListener(
+    "keyup",
+    function(event) {
+
+        const capsWarning =
+            document.getElementById("capsWarning");
+
+        if (event.getModifierState &&
+            event.getModifierState("CapsLock")) {
+
+            capsWarning.style.display =
+                "block";
+
+        } else {
+
+            capsWarning.style.display =
+                "none";
+
+        }
+
+    }
+);
+
+
+/* Clear form */
+
+document
+    .getElementById("clearBtn")
+    .addEventListener("click", function() {
+
+        const form =
+            document.getElementById("loginForm");
+
+        form.reset();
+
+        document
+            .getElementById("passwordStrength")
+            .style.display = "none";
+
+        document
+            .getElementById("capsWarning")
+            .style.display = "none";
+
+        document
+            .getElementById("successMessage")
+            .style.display = "none";
+
+        password.type = "password";
+
+        document
+            .getElementById("passwordToggle")
+            .textContent = "👁️";
+
+    });
+
+
+/* Sign in */
+
+document
+    .getElementById("loginForm")
+    .addEventListener("submit", function(event) {
+
+        event.preventDefault();
+
+        const email =
+            document.getElementById("email");
+
+        const password =
+            document.getElementById("pwd");
+
+        const button =
+            document.getElementById("loginBtn");
+
+        const message =
+            document.getElementById("successMessage");
+
+        if (!email.checkValidity()) {
+
+            email.focus();
+
+            return;
+        }
+
+        if (!password.checkValidity()) {
+
+            password.focus();
+
+            return;
+        }
+
+        button.disabled = true;
+
+        button.textContent =
+            "Signing In...";
+
+        message.style.display =
+            "none";
+
+        setTimeout(function() {
+
+            button.disabled = false;
+
+            button.textContent =
+                "Sign In";
+
+            message.style.display =
+                "block";
+
+        }, 1500);
+
+    });
+
+</script>
+
+</body>
+</html>
