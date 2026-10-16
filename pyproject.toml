@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zylker-projects"
+version = "0.1.0"
+description = "Project and task management for organisations: boards, dependencies, milestones, workload, reports and Zoho Cliq notifications."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []  # standard library only
+
+[project.optional-dependencies]
+e2e = ["playwright>=1.40"]  # browser tests only; the app itself has no dependencies
+
+[project.scripts]
+zylker-pm = "zylker_pm.cli:main"
+
+[tool.setuptools]
+packages = ["zylker_pm", "zylker_pm.services"]
+
+[tool.setuptools.package-data]
+zylker_pm = ["static/*"]
+
+[tool.ruff]
+line-length = 160
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+ignore = ["E501", "B008", "UP031", "UP032"]

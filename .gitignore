@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Local databases and backups (they can contain real project data and token hashes)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+backup*.db
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/

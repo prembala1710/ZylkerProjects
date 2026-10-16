@@ -1,0 +1,4 @@
+Issue key,Summary,Issue Type,Status,Priority,Assignee,Reporter,Due Date,Labels,Labels,Description
+DEMO-1,Fix the login redirect loop,Bug,In Progress,High,bob,alice,30-Oct-26,auth,backend,Users bounce between /login and /home after a password reset.
+DEMO-2,Write the onboarding guide,Story,To Do,Low,carol,,2026-12-01,docs,,
+DEMO-3,Rotate the staging credentials,Task,Done,Highest,,alice,05/Oct/2026 12:00 AM,security,,
