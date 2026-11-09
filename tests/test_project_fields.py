@@ -494,7 +494,7 @@ class MigrationTests(FieldsBase):
     def v1_database(self, path):
         """A database exactly as the previous release created it (schema v1, no custom-field tables)."""
         conn = sqlite3.connect(path)
-        conn.executescript(db.SCHEMA.replace(db.PROJECT_FIELDS_SCHEMA, ""))
+        conn.executescript(db.SCHEMA.replace(db.TASK_EXTRAS_SCHEMA, "").replace(db.PROJECT_FIELDS_SCHEMA, ""))
         conn.execute("PRAGMA user_version = 1")
         conn.execute("INSERT INTO users (id, username, display_name, role, token_hash, created_at) VALUES (1,'old','Old','admin','h','2026-01-01T00:00:00Z')")
         conn.execute("INSERT INTO projects (id, key, name, status, owner_id, created_at, updated_at) VALUES (1,'OLD','Legacy','active',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')")
