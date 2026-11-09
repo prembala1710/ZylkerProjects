@@ -160,7 +160,7 @@ class LoginTests(UiCase):
 class PageTests(UiCase):
     def test_every_page_renders_cleanly_for_an_admin(self):
         page = self.open("prem")
-        routes = ["#/dashboard", "#/mine", "#/team", "#/users"]
+        routes = ["#/dashboard", "#/mine", "#/team", "#/users", "#/fields"]
         for key in ("WEB", "APP", "INT"):
             routes += ["#/p/%s/%s" % (key, tab) for tab in ("board", "list", "timeline", "milestones", "reports", "activity", "settings")]
         for r in routes:
@@ -377,3 +377,182 @@ class SafetyTests(UiCase):
         self.assertEqual(page.evaluate("typeof window.__pwned"), "undefined")
         api(TOKENS["prem"], "DELETE", "/tasks/%s" % key)
         api(TOKENS["prem"], "DELETE", "/projects/XSS?confirm=XSS")
+
+
+class CustomFieldTests(UiCase):
+    """Project custom fields (text / number / URL): admin setup, entering values, validation, display, safety."""
+
+    def cleanup_field(self, key):
+        self.addCleanup(lambda: api(TOKENS["prem"], "DELETE", "/project-fields/%s?confirm=%s" % (key, key)))
+
+    def test_admin_creates_edits_and_deletes_a_field_through_the_ui(self):
+        self.cleanup_field("cost_centre")
+        page = self.open("prem", "#/fields")
+        expect(page.locator("table.table tbody tr")).to_have_count(3)  # the demo fields
+        expect(page.locator("table.table")).to_contain_text("Budget (USD)")
+        expect(page.locator("table.table")).to_contain_text("Whole numbers, min 0")
+        self.assert_clean_text(page, "project fields")
+        page.get_by_text("+ New field").click()
+        page.get_by_label("Label").fill("Cost centre")
+        expect(page.get_by_label("Key", exact=False).first).to_have_value("cost_centre")  # suggested from the label
+        page.locator(".modal select").first.select_option("number")
+        expect(page.get_by_label("Maximum length")).to_be_hidden()  # only the settings of the chosen type are shown
+        page.get_by_label("Decimal places").select_option("0")
+        page.get_by_label("Minimum (optional)").fill("10")
+        page.get_by_label("Maximum (optional)").fill("5")
+        page.get_by_role("button", name="Create field").click()
+        expect(page.locator(".toast.error")).to_contain_text("minimum cannot be greater")  # caught in the browser
+        page.get_by_label("Maximum (optional)").fill("999")
+        page.get_by_role("button", name="Create field").click()
+        expect(page.locator(".toast.ok", has_text="Field created")).to_have_count(1)
+        row = page.locator("table.table tbody tr", has_text="Cost centre")
+        expect(row).to_contain_text("cost_centre")
+        expect(row).to_contain_text("Whole numbers, min 10, max 999")
+        row.get_by_role("button", name="Edit").click()
+        expect(page.locator(".modal input[disabled]")).to_have_count(1)  # the key cannot change after creation
+        expect(page.locator(".modal select[disabled]")).to_have_count(1)  # neither can the type
+        page.get_by_label("Label").fill("Cost center")
+        page.locator(".modal input[type=checkbox]").check()
+        page.get_by_role("button", name="Save changes").click()
+        expect(page.locator(".toast.ok", has_text="Field saved")).to_have_count(1)
+        row = page.locator("table.table tbody tr", has_text="Cost center")
+        expect(row).to_contain_text("Required")
+        row.get_by_role("button", name="Delete").click()
+        go = page.get_by_role("button", name="Delete forever")
+        expect(go).to_be_disabled()  # must type the key first
+        page.get_by_label("Type the field key to confirm").fill("cost_centre")
+        go.click()
+        expect(page.locator(".toast.ok", has_text="Field deleted")).to_have_count(1)
+        expect(page.locator("table.table tbody tr")).to_have_count(3)
+
+    def test_manager_edits_values_and_the_browser_blocks_bad_input_before_the_server_sees_it(self):
+        page = self.open("alice", "#/p/INT/settings")
+        self.settle(page)
+        client, budget, wiki = page.get_by_label("Client"), page.get_by_label("Budget (USD)"), page.get_by_label("Wiki")
+        for el in (client, budget, wiki):
+            expect(el).to_be_enabled()
+        expect(budget).to_have_attribute("type", "number")
+        expect(wiki).to_have_attribute("type", "url")
+        expect(client).to_have_attribute("maxlength", "80")
+        calls = []
+        page.on("request", lambda r: calls.append(r.method) if r.method == "PATCH" else None)
+        client.fill("Initech")
+        budget.fill("5000.5")  # budget allows whole numbers only
+        page.get_by_role("button", name="Save changes").click()
+        self.assertEqual(page.evaluate("document.activeElement.getAttribute('type')"), "number")
+        self.assertIn("Whole numbers", page.evaluate("document.activeElement.validationMessage"))
+        budget.fill("-5")  # below the minimum of 0
+        page.get_by_role("button", name="Save changes").click()
+        self.assertFalse(page.evaluate("document.activeElement.validity.valid"))
+        budget.fill("5000")
+        wiki.fill("javascript:alert(1)")
+        page.get_by_role("button", name="Save changes").click()
+        self.assertFalse(page.evaluate("document.activeElement.validity.valid"))
+        self.assertEqual(calls, [], "nothing may be sent while the form is invalid")
+        self.assertIsNone(api(TOKENS["alice"], "GET", "/projects/INT")[1]["custom_fields"]["client"])
+        wiki.fill("https://wiki.example.com/int")
+        page.get_by_role("button", name="Save changes").click()
+        expect(page.locator(".toast.ok")).to_contain_text("Project saved")
+        self.assertEqual(calls, ["PATCH"])
+        self.assertEqual(api(TOKENS["alice"], "GET", "/projects/INT")[1]["custom_fields"], {"client": "Initech", "budget_usd": 5000, "wiki": "https://wiki.example.com/int"})
+        # shown in the project header; the address is a safe, new-tab link
+        self.settle(page)
+        summary = page.locator(".cf-summary")
+        expect(summary.locator("dt").first).to_have_text("Client")
+        expect(summary).to_contain_text("Initech")
+        expect(summary).to_contain_text("5,000")
+        link = summary.get_by_role("link")
+        expect(link).to_have_attribute("href", "https://wiki.example.com/int")
+        expect(link).to_have_attribute("target", "_blank")
+        expect(link).to_have_attribute("rel", "noopener noreferrer nofollow")
+        # clearing a value sends null and the activity feed explains the change using the field's label
+        page.get_by_label("Client").fill("")
+        page.get_by_role("button", name="Save changes").click()
+        expect(page.locator(".toast.ok")).to_contain_text("Project saved")
+        self.assertIsNone(api(TOKENS["alice"], "GET", "/projects/INT")[1]["custom_fields"]["client"])
+        page.evaluate("location.hash = '#/p/INT/activity'")
+        expect(page.locator(".item").first).to_contain_text("Client: Initech \u2192 none")
+        self.assert_clean_text(page, "activity")
+        api(TOKENS["alice"], "PATCH", "/projects/INT", {"custom_fields": {"budget_usd": None, "wiki": None}})
+
+    def test_saving_other_details_does_not_resend_untouched_custom_fields(self):
+        page = self.open("alice", "#/p/WEB/settings")
+        self.settle(page)
+        bodies = []
+        page.on("request", lambda r: bodies.append(json.loads(r.post_data)) if r.method == "PATCH" else None)
+        page.locator("textarea").first.fill("Updated description")
+        page.get_by_role("button", name="Save changes").click()
+        expect(page.locator(".toast.ok")).to_contain_text("Project saved")
+        self.assertEqual(len(bodies), 1)
+        self.assertNotIn("custom_fields", bodies[0])
+        api(TOKENS["alice"], "PATCH", "/projects/WEB", {"description": "Replace the marketing site with the new design system and an accessible, faster build."})
+
+    def test_new_project_dialog_takes_values_and_a_required_field_is_enforced(self):
+        self.cleanup_field("team_code")
+        self.addCleanup(lambda: api(TOKENS["prem"], "DELETE", "/projects/ZZ1?confirm=ZZ1"))
+        status, _ = api(TOKENS["prem"], "POST", "/project-fields", {"key": "team_code", "label": "Team code", "type": "text", "required": True, "max_length": 6})
+        self.assertEqual(status, 201)
+        page = self.open("alice")
+        page.get_by_role("button", name="+ New project").first.click()
+        expect(page.locator(".modal")).to_contain_text("Team code *")
+        page.locator(".modal input[maxlength='10']").fill("zz1")
+        page.locator(".modal input[maxlength='100']").fill("Custom field project")
+        page.get_by_label("Client").fill("Hooli")
+        page.get_by_label("Budget (USD)").fill("1200")
+        page.get_by_role("button", name="Create project").click()
+        self.assertTrue(page.evaluate("document.activeElement.validity.valueMissing"))  # the required field blocks it
+        expect(page.locator(".modal")).to_be_visible()
+        self.assertEqual(api(TOKENS["alice"], "GET", "/projects/ZZ1")[0], 404)
+        page.get_by_label("Team code").fill("T-42")
+        page.get_by_role("button", name="Create project").click()
+        expect(page.locator("#view h1")).to_have_text("Custom field project")
+        expect(page.locator(".cf-summary")).to_contain_text("Hooli")
+        expect(page.locator(".cf-summary")).to_contain_text("T-42")
+        self.assertEqual(api(TOKENS["alice"], "GET", "/projects/ZZ1")[1]["custom_fields"], {"client": "Hooli", "budget_usd": 1200, "wiki": None, "team_code": "T-42"})
+        # a project that existed before the field became required stays editable without filling it in
+        page.evaluate("location.hash = '#/p/WEB/settings'")
+        self.settle(page)
+        page.get_by_label("Client").fill("Zylker Retail Ltd")
+        page.get_by_role("button", name="Save changes").click()
+        expect(page.locator(".toast.ok", has_text="Project saved")).to_have_count(1)
+        api(TOKENS["alice"], "PATCH", "/projects/WEB", {"custom_fields": {"client": "Zylker Retail"}})
+
+    def test_viewers_and_members_see_values_but_cannot_edit_them(self):
+        for user in ("erin", "bob"):
+            page = self.open(user, "#/p/APP/settings")  # neither is a manager
+            self.settle(page)
+            expect(page.locator(".cf-summary")).to_contain_text("Zylker Mobile")
+            for label in ("Client", "Budget (USD)", "Wiki"):
+                expect(page.get_by_label(label)).to_be_disabled()
+            expect(page.get_by_role("button", name="Save changes")).to_have_count(0)
+            expect(page.get_by_text("Project fields")).to_have_count(0)  # the admin screen is not offered
+            self.assert_clean_text(page, "settings (%s)" % user)
+
+    def test_hostile_values_are_shown_as_text_and_dangerous_links_are_refused(self):
+        evil = "<img src=x onerror=window.__pwned=1>"
+        status, _ = api(TOKENS["prem"], "PATCH", "/projects/INT", {"custom_fields": {"client": evil}})
+        self.assertEqual(status, 200)
+        self.addCleanup(lambda: api(TOKENS["prem"], "PATCH", "/projects/INT", {"custom_fields": {"client": None, "wiki": None}}))
+        for bad in ("javascript:window.__pwned=2", "data:text/html,<script>window.__pwned=3</script>", " //evil.example"):
+            status, _ = api(TOKENS["prem"], "PATCH", "/projects/INT", {"custom_fields": {"wiki": bad}})
+            self.assertEqual(status, 422, bad)  # the server never stores them, so the UI can never render them
+        page = self.open("prem", "#/p/INT/board")
+        self.settle(page)
+        expect(page.locator(".cf-summary")).to_contain_text(evil)  # literal text
+        self.assertEqual(page.locator("#view img").count(), 0)
+        page.evaluate("location.hash = '#/p/INT/settings'")
+        self.settle(page)
+        expect(page.get_by_label("Client")).to_have_value(evil)
+        self.assertEqual(page.evaluate("typeof window.__pwned"), "undefined")
+
+    def test_layout_holds_on_a_phone_with_long_values(self):
+        long_url = "https://wiki.example.com/" + "a-very-long-path-segment/" * 8
+        status, _ = api(TOKENS["prem"], "PATCH", "/projects/INT", {"custom_fields": {"client": "C" * 80, "wiki": long_url}})
+        self.assertEqual(status, 200)
+        self.addCleanup(lambda: api(TOKENS["prem"], "PATCH", "/projects/INT", {"custom_fields": {"client": None, "wiki": None}}))
+        page = self.open("alice", viewport={"width": 390, "height": 800})
+        for r in ("#/p/INT/board", "#/p/INT/settings", "#/fields"):
+            page.evaluate("h => location.hash = h", r)
+            self.settle(page)
+            overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
+            self.assertLessEqual(overflow, 1, "horizontal page overflow on %s" % r)
