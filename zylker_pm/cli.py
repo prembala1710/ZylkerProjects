@@ -23,8 +23,17 @@ from .services import csvio, reports, users
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
 
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (TimeoutError, ConnectionError)):  # a client that stalled or hung up: nothing to report
+            return
+        super().handle_error(request, client_address)
+
 
 class QuietHandler(WSGIRequestHandler):
+    # A client that neither sends nor reads anything for this long is dropped: uploads can be megabytes, and a stalled one
+    # must not keep a thread, a connection and a half-received file around for ever. (It limits silence, not total time.)
+    timeout = 60
+
     def log_message(self, format, *args):  # noqa: A002 - the app writes its own access log
         return
 

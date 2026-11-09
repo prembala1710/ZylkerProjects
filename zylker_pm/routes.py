@@ -319,3 +319,8 @@ def report_timesheet(ctx, req):
 @route("GET", "/api/reports/digest")
 def report_digest(ctx, req):
     return reports.digest(ctx, req.query)
+
+
+# ----------------------------------------------------------------------- attachments
+
+from . import attachment_routes  # noqa: E402, F401 - registers the attachment endpoints

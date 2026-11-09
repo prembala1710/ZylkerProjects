@@ -25,6 +25,7 @@ from .errors import (
     PayloadTooLarge,
     UnsupportedMediaType,
 )
+from .services import attachments
 
 log = logging.getLogger("zylker.access")
 
@@ -77,6 +78,7 @@ class Request:
         self.query = dict(parse_qsl(environ.get("QUERY_STRING", ""), keep_blank_values=True))
         self.content_type = (environ.get("CONTENT_TYPE") or "").split(";")[0].strip().lower()
         self.authorization = environ.get("HTTP_AUTHORIZATION")
+        self.transfer_encoding = (environ.get("HTTP_TRANSFER_ENCODING") or "").strip().lower()
         self._environ = environ
         self._limit = max_body
         self._body = None
@@ -92,7 +94,13 @@ class Request:
 
     def body(self) -> bytes:
         if self._body is None:
-            self._body = self._environ["wsgi.input"].read(self.length) if self.length else b""
+            try:
+                data = self._environ["wsgi.input"].read(self.length) if self.length else b""
+            except OSError:  # a stalled or reset connection (socket timeouts are OSErrors too)
+                data = b""
+            if len(data) != self.length:  # the client went away mid-upload: never treat half a file (or CSV) as the whole
+                raise BadRequest("The request body ended early (%d of %d bytes received)" % (len(data), self.length), code="incomplete_body")
+            self._body = data
         return self._body
 
     def json(self):
@@ -116,9 +124,9 @@ class Request:
 
 
 class Route:
-    def __init__(self, method, pattern, handler, role, public, body_limit):
+    def __init__(self, method, pattern, handler, role, public, body_limit, prefetch=False):
         self.method, self.pattern, self.handler = method, pattern, handler
-        self.role, self.public, self.body_limit = role, public, body_limit
+        self.role, self.public, self.body_limit, self.prefetch = role, public, body_limit, prefetch
         parts = re.split(r"(\{\w+\})", pattern)
         self.regex = re.compile(
             "^" + "".join("(?P<%s>[^/]+)" % p[1:-1] if p.startswith("{") else re.escape(p) for p in parts) + "$"
@@ -128,11 +136,16 @@ class Route:
 ROUTES: list[Route] = []
 
 
-def route(method, pattern, role="viewer", public=False, body_limit=None):
-    """Register a handler ``fn(ctx, req, **path_params)`` with a minimum role."""
+def route(method, pattern, role="viewer", public=False, body_limit=None, prefetch=False):
+    """Register a handler ``fn(ctx, req, **path_params)`` with a minimum role.
+
+    ``prefetch=True`` makes the server read the whole request body *before* the database transaction starts. Writers
+    hold SQLite's single write lock from ``BEGIN IMMEDIATE`` on, so a route that takes a large body (a file upload)
+    must not wait for a slow client while holding it. The read happens after authentication, never before.
+    """
 
     def decorator(fn):
-        ROUTES.append(Route(method, pattern, fn, role, public, body_limit))
+        ROUTES.append(Route(method, pattern, fn, role, public, body_limit, prefetch))
         return fn
 
     return decorator
@@ -145,6 +158,7 @@ class App:
         config.validate()
         self.config = config
         self.tz = get_tz(config.timezone)
+        attachments.ensure_schema(config.db_path)  # additive tables for databases created before attachments existed
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.notifier = notifier if notifier is not None else notify.build_notifier(config)
 
@@ -223,6 +237,8 @@ class App:
                         "This action requires the %r role or higher (you are %r)" % (r.role, user["role"]),
                         code="insufficient_role",
                     )
+            if r.prefetch:
+                req.body()
             with transaction(conn, write=req.method not in ("GET", "HEAD")):
                 ctx = Context(conn, user, self.clock(), self.tz, self.config)
                 result = r.handler(ctx, req, **params)
