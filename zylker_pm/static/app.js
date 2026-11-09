@@ -419,7 +419,7 @@ function taskTable(tasks, opts = {}) {
 }
 
 /* ============================== project view ============================== */
-const TABS = [['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline'], ['milestones', 'Milestones'], ['reports', 'Reports'], ['activity', 'Activity'], ['settings', 'Settings']];
+const TABS = [['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline'], ['milestones', 'Milestones'], ['files', 'Files'], ['reports', 'Reports'], ['activity', 'Activity'], ['settings', 'Settings']];
 
 async function projectView(view, key, tab, alive) {
   const [project, summary] = await Promise.all([api('/projects/' + key), api(`/projects/${key}/summary`)]);
@@ -444,7 +444,7 @@ async function projectView(view, key, tab, alive) {
   const refreshHeader = async () => renderHeader(await api(`/projects/${key}/summary`));
   const body = h('div');
   view.append(headerBox, h('nav', { class: 'tabs', 'aria-label': 'Project sections' }, TABS.map(([id, label]) => h('a', { href: `#/p/${key}/${id}`, class: id === tab ? 'active' : '', 'aria-current': id === tab ? 'page' : null }, label))), body);
-  const tabs = { board: boardTab, list: listTab, timeline: timelineTab, milestones: milestonesTab, reports: reportsTab, activity: activityTab, settings: settingsTab };
+  const tabs = { board: boardTab, list: listTab, timeline: timelineTab, milestones: milestonesTab, files: filesTab, reports: reportsTab, activity: activityTab, settings: settingsTab };
   await tabs[tab](body, { project, summary, key, refreshHeader, alive });
   if (alive() && state.pendingTask) { const k = state.pendingTask; state.pendingTask = null; openTask(k); }
 }
@@ -731,6 +731,8 @@ function describeActivity(a) {
     case 'comment.deleted': return `deleted a comment on ${t}`;
     case 'time.logged': return `logged ${d.hours}h on ${t} for ${d.work_date}`;
     case 'time.deleted': return `removed a ${d.hours}h time entry from ${t}`;
+    case 'attachment.added': return `attached \u201c${d.filename}\u201d (${fmtBytes(d.size)}) to ${t}`;
+    case 'attachment.deleted': return `removed the attachment \u201c${d.filename}\u201d from ${t}`;
     case 'milestone.created': return `added milestone \u201c${d.name}\u201d due ${d.due_date}`;
     case 'milestone.updated': return `updated a milestone (${change(d.changes)})`;
     case 'milestone.deleted': return `deleted milestone \u201c${d.name}\u201d`;
@@ -870,20 +872,23 @@ async function openTask(key) {
   const project = await getProject(task.project);
   const milestones = (await api(`/projects/${task.project}/milestones`)).items;
   const editable = canWrite(project);
-  let dirty = false, comments = [], time = [], acts = [];
+  let dirty = false, comments = [], time = [], acts = [], files = { items: [], total_bytes: 0, limits: null }, uploading = false, uploadNote = '';
   // Typed-but-unsent text survives the re-render that follows every saved field change.
   const drafts = { description: null, comment: '', subtask: '', depKey: '', depDir: 'blocked_by', hours: '', day: state.today, note: '' };
   const track = (name) => (e) => { drafts[name] = e.target.value; };
   const body = h('div');
-  const handle = openModal({ title: null, content: body, onClose: () => { if (dirty) route(); } });
+  const handle = openModal({ title: null, content: body, onClose: () => { stopAccepting(); if (dirty) route(); } });
   handle.el.setAttribute('aria-label', `${task.key} ${task.title}`);
+  const stopAccepting = acceptFiles({ isTop: () => modalStack[modalStack.length - 1] === handle, canAttach: editable,
+    onFiles: (list) => (editable ? attach(list) : toast('You have read-only access to this task, so files cannot be attached.', 'error')) });
 
   let loadSeq = 0;
   async function loadAll() {
     const mine = ++loadSeq;
-    const fresh = await Promise.all([api('/tasks/' + key), api(`/tasks/${key}/comments`).then((r) => r.items), api(`/tasks/${key}/time`).then((r) => r.items), api(`/tasks/${key}/activity`, { query: { limit: 15 } }).then((r) => r.items)]);
+    const fresh = await Promise.all([api('/tasks/' + key), api(`/tasks/${key}/comments`).then((r) => r.items), api(`/tasks/${key}/time`).then((r) => r.items), api(`/tasks/${key}/activity`, { query: { limit: 15 } }).then((r) => r.items),
+      api(`/tasks/${key}/attachments`)]);
     if (mine !== loadSeq) return; // a newer load is in flight: an older response must never overwrite newer state
-    [task, comments, time, acts] = fresh;
+    [task, comments, time, acts, files] = fresh;
     render();
   }
   async function patch(change) {
@@ -921,12 +926,12 @@ async function openTask(key) {
         task.blocked_by_open ? badge('blocked', `Waiting on ${task.blocked_by_open}`) : null, h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', 'aria-label': 'Close', onclick: () => handle.close() }, '\u2715')),
       project.status === 'archived' ? h('p', { class: 'small muted', text: 'This project is archived, so its tasks are read-only.' }) : !editable ? h('p', { class: 'small muted', text: 'You have read-only access to this task.' }) : null,
       h('div', { class: 'task-layout' }, h('div', {}, title, h('div', { class: 'stack', style: { marginTop: '8px' } }, desc, saveDesc),
-        subtasksSection(), dependenciesSection(), timeSection(), commentsSection(), activitySection()), side));
+        attachmentsSection(), subtasksSection(), dependenciesSection(), timeSection(), commentsSection(), activitySection()), side));
   }
 
   async function switchTo(otherKey) { handle.close(); openTask(otherKey); }
   async function deleteTask() {
-    if (!(await confirmBox(`Delete ${task.key} permanently? Its comments, time and history go with it.`, 'Delete task', true))) return;
+    if (!(await confirmBox(`Delete ${task.key} permanently? Its comments, time, attachments and history go with it.`, 'Delete task', true))) return;
     try { await api('/tasks/' + key, { method: 'DELETE' }); }
     catch (e) {
       if (e.code === 'has_subtasks' && (await confirmBox(`${e.message} Delete the subtasks too?`, 'Delete all', true))) await api('/tasks/' + key, { method: 'DELETE', query: { cascade: 'true' } });
@@ -979,11 +984,166 @@ async function openTask(key) {
     const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => { await api('/comments/' + c.id, { method: 'PATCH', body: { body: area.value } }); m.close(); await reload(); }) }, 'Save');
     const m = openModal({ title: 'Edit comment', narrow: true, content: area, footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
   }
+  async function attach(list) {
+    if (uploading) { toast('Wait for the current upload to finish.', 'error'); return; }
+    uploading = true; uploadNote = 'Starting\u2026'; render();
+    try {
+      const sent = await uploadFiles(key, list, files.limits, (text) => { uploadNote = text; const el = $('[data-upload-status]', body); if (el) el.textContent = text; });
+      if (sent) toast(`${plural(sent, 'file')} attached`, 'ok');
+    } finally { uploading = false; uploadNote = ''; await reload(); }
+  }
+  function attachmentsSection() {
+    const picker = h('input', { type: 'file', multiple: true, class: 'hidden', 'aria-label': 'Choose files to attach', onchange: (e) => { const chosen = [...e.target.files]; e.target.value = ''; if (chosen.length) attach(chosen); } });
+    const size = files.items.length ? ` (${files.items.length} \u00b7 ${fmtBytes(files.total_bytes)})` : '';
+    return h('div', { class: 'section', id: 'attachments' }, h('h3', { text: `Attachments${size}` }),
+      files.items.map((a) => attachmentItem(a, project, reload)),
+      !files.items.length ? h('div', { class: 'small muted', text: editable ? 'No files yet. Drop them anywhere on this window, paste a screenshot, or choose files.' : 'No attachments.' }) : null,
+      editable ? h('div', { class: 'row', style: { marginTop: '6px' } }, h('button', { class: 'btn small', disabled: uploading, onclick: () => picker.click() }, 'Attach files'), picker,
+        h('span', { class: 'small muted', role: 'status', 'aria-live': 'polite', dataset: { uploadStatus: '' }, text: uploading ? uploadNote : '' })) : null);
+  }
   function activitySection() {
     return h('div', { class: 'section' }, h('h3', { text: 'History' }), acts.length ? acts.map(activityItem) : h('div', { class: 'small muted', text: 'No history yet.' }));
   }
 
   await loadAll();
+}
+
+/* ============================== attachments ============================== */
+// Files are only ever handed to the browser to save (always as an octet-stream), or - for the few image types the server
+// has verified by their bytes - shown through a data: URL in an <img>. Nothing from a file is ever rendered as a page.
+function fmtBytes(n) {
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let v = n / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || Number.isInteger(v) ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+const fileExt = (name) => { const m = /\.([A-Za-z0-9]{1,5})$/.exec(name); return m ? m[1].toUpperCase() : 'FILE'; };
+const canDeleteAttachment = (a, project) => canWrite(project) && (hasRole('manager') || (a.uploaded_by && a.uploaded_by.username === state.me.username));
+
+async function downloadAttachment(a) {
+  try {
+    const stored = await api(`/attachments/${a.id}/content`, { blob: true });
+    const url = URL.createObjectURL(new Blob([stored], { type: 'application/octet-stream' })); // never a type a browser would render
+    const link = h('a', { href: url, download: a.filename });
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  } catch (e) { toast(e.message, 'error'); }
+}
+async function previewAttachment(a) {
+  const note = h('p', { class: 'muted small', text: 'Loading preview\u2026' });
+  const box = h('div', { class: 'preview-box' }, note);
+  const m = openModal({ title: a.filename, content: box, footer: [h('button', { class: 'btn', onclick: () => downloadAttachment(a) }, 'Download'), h('button', { class: 'btn primary', onclick: () => m.close() }, 'Close')] });
+  try {
+    const stored = await api(`/attachments/${a.id}/content`, { blob: true });
+    const typed = new Blob([await stored.arrayBuffer()], { type: a.preview }); // the type the server verified, not the one the file claimed
+    const url = await new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(typed); });
+    clear(box);
+    box.append(h('img', { src: url, alt: a.filename, class: 'preview-img' }));
+  } catch (e) { note.textContent = e.message; }
+}
+async function deleteAttachment(a, button, onChange) {
+  if (!(await confirmBox(`Delete ${a.filename} from ${a.task}? This cannot be undone.`, 'Delete', true))) return;
+  await guarded(button, async () => { await api('/attachments/' + a.id, { method: 'DELETE' }); toast('Attachment deleted', 'ok'); await onChange(); });
+}
+function attachmentItem(a, project, onChange) {
+  const who = a.uploaded_by ? a.uploaded_by.display_name : 'unknown';
+  return h('div', { class: 'item attachment' }, h('span', { class: 'ext', text: fileExt(a.filename) }),
+    h('div', { class: 'grow' }, h('div', { class: 'file-name', title: a.filename, text: a.filename }), h('div', { class: 'small muted', text: `${fmtBytes(a.size)} \u00b7 ${who} \u00b7 ${fmtAgo(a.created_at)}` })),
+    a.preview ? h('button', { class: 'btn ghost small', 'aria-label': `Preview ${a.filename}`, onclick: () => previewAttachment(a) }, 'Preview') : null,
+    h('button', { class: 'btn ghost small', 'aria-label': `Download ${a.filename}`, onclick: () => downloadAttachment(a) }, 'Download'),
+    canDeleteAttachment(a, project) ? h('button', { class: 'btn ghost small', 'aria-label': `Delete ${a.filename}`, onclick: (e) => deleteAttachment(a, e.currentTarget, onChange) }, '\u2715') : null);
+}
+// One at a time: the server holds a whole file in memory while it stores it, and sequential requests keep the order obvious.
+async function uploadFiles(key, list, limits, progress) {
+  const max = limits ? limits.max_file_bytes : Infinity;
+  let sent = 0;
+  for (const [i, file] of list.entries()) {
+    progress(`Uploading ${i + 1} of ${list.length}: ${file.name}\u2026`);
+    if (file.size === 0) { toast(`${file.name} is empty, so it was not attached.`, 'error'); continue; }
+    if (file.size > max) { toast(`${file.name} is ${fmtBytes(file.size)}; files can be at most ${fmtBytes(max)}.`, 'error'); continue; }
+    try {
+      await api(`/tasks/${key}/attachments`, { method: 'POST', body: file, contentType: file.type || 'application/octet-stream', query: { filename: file.name } });
+      sent++;
+    } catch (e) { toast(`${file.name}: ${e.message}`, 'error'); }
+  }
+  return sent;
+}
+// A screenshot pasted from the clipboard arrives as "image.png"; give it a name that tells one from another.
+function pastedName(file) {
+  if (file.name && !/^(image|blob|untitled)(\.\w+)?$/i.test(file.name)) return file;
+  const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[file.type] || 'bin';
+  const d = new Date(), pad = (n) => String(n).padStart(2, '0');
+  return new File([file], `pasted-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.${ext}`, { type: file.type });
+}
+// While a task dialog is the top-most window, files dropped or pasted anywhere go to that task. A file dropped on a page the app does not
+// handle would make the browser leave the app and open it, so every file drag is claimed - a read-only dialog explains instead of attaching.
+function acceptFiles({ isTop, canAttach, onFiles }) {
+  let depth = 0, idle = null; // dragenter/dragleave also fire for every element the pointer crosses, and a missed one must not leave the overlay stuck
+  const carriesFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+  const claims = () => isTop() && canAttach;
+  const highlight = (on) => { document.body.classList.toggle('dropping', on); clearTimeout(idle); if (!on) depth = 0; };
+  const listeners = {
+    dragenter: (e) => { if (!carriesFiles(e)) return; e.preventDefault(); if (claims()) depth++; },
+    dragover: (e) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = claims() ? 'copy' : 'none';
+      if (claims()) { highlight(true); idle = setTimeout(() => highlight(false), 1000); } // dragover repeats while the pointer is over the page; silence means the drag is over
+    },
+    dragleave: (e) => { if (!carriesFiles(e)) return; depth = Math.max(0, depth - 1); if (!depth) highlight(false); },
+    drop: (e) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault(); highlight(false);
+      if (isTop() && e.dataTransfer.files.length) onFiles([...e.dataTransfer.files]);
+    },
+    paste: (e) => {
+      const list = isTop() && e.clipboardData ? [...e.clipboardData.files] : [];
+      if (!list.length) return; // ordinary text pastes untouched
+      e.preventDefault();
+      onFiles(list.map(pastedName));
+    },
+  };
+  for (const [type, fn] of Object.entries(listeners)) document.addEventListener(type, fn);
+  return () => { for (const [type, fn] of Object.entries(listeners)) document.removeEventListener(type, fn); highlight(false); };
+}
+
+/* ---------- the project's Files tab ---------- */
+async function filesTab(root, ctx) {
+  const { project, key } = ctx;
+  const LIMIT = 25;
+  const f = { q: '', offset: 0 };
+  const results = h('div', { class: 'card flush' });
+  const summary = h('span', { class: 'small muted' });
+  const pager = h('div', { class: 'row small muted', style: { marginTop: '10px' } });
+  async function load() {
+    const data = await api(`/projects/${key}/attachments`, { query: { q: f.q, limit: LIMIT, offset: f.offset } });
+    if (!ctx.alive()) return;
+    summary.textContent = `${plural(data.total, 'file')} \u00b7 ${fmtBytes(data.total_bytes)}${f.q ? ' matching the search' : ' in this project'}`;
+    clear(results);
+    if (!data.items.length) results.append(h('div', { class: 'empty', text: f.q ? 'No file names match.' : 'No files yet. Open a task and attach screenshots, specs or logs.' }));
+    else results.append(h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['File', 'Task', 'Size', 'Attached by', 'When', ''].map((x) => h('th', { text: x })))),
+      h('tbody', {}, data.items.map((a) => h('tr', {},
+        h('td', {}, h('div', { class: 'row attachment' }, h('span', { class: 'ext', text: fileExt(a.filename) }), h('span', { class: 'file-name', title: a.filename, text: a.filename }))),
+        h('td', {}, h('a', { href: '#/t/' + a.task, title: a.task_title, onclick: (e) => { e.preventDefault(); openTask(a.task); } }, h('strong', { text: a.task }), ' ', h('span', { class: 'muted small', text: a.task_title }))),
+        h('td', { class: 'nowrap', text: fmtBytes(a.size) }),
+        h('td', {}, h('div', { class: 'row' }, avatar(a.uploaded_by), a.uploaded_by ? h('span', { class: 'small nowrap', text: a.uploaded_by.display_name }) : null)),
+        h('td', { class: 'nowrap small muted', text: fmtAgo(a.created_at) }),
+        h('td', { class: 'nowrap right' },
+          a.preview ? h('button', { class: 'btn ghost small', 'aria-label': `Preview ${a.filename}`, onclick: () => previewAttachment(a) }, 'Preview') : null,
+          h('button', { class: 'btn ghost small', 'aria-label': `Download ${a.filename}`, onclick: () => downloadAttachment(a) }, 'Download'),
+          canDeleteAttachment(a, project) ? h('button', { class: 'btn ghost small', 'aria-label': `Delete ${a.filename}`, onclick: (e) => deleteAttachment(a, e.currentTarget, load) }, '\u2715') : null))))));
+    clear(pager);
+    const end = Math.min(f.offset + LIMIT, data.total);
+    if (data.total > LIMIT) pager.append(h('span', { text: `${f.offset + 1}\u2013${end} of ${data.total}` }), h('span', { class: 'spacer' }),
+      h('button', { class: 'btn small', disabled: f.offset === 0, onclick: () => { f.offset = Math.max(0, f.offset - LIMIT); load(); } }, '\u2039 Prev'),
+      h('button', { class: 'btn small', disabled: end >= data.total, onclick: () => { f.offset += LIMIT; load(); } }, 'Next \u203A'));
+  }
+  let timer;
+  root.append(h('div', { class: 'toolbar' },
+    h('input', { type: 'search', placeholder: 'Search file names\u2026', 'aria-label': 'Search file names', oninput: (e) => { clearTimeout(timer); const v = e.target.value; timer = setTimeout(() => { f.q = v.trim(); f.offset = 0; load(); }, 250); } }),
+    h('span', { class: 'spacer' }), summary), results, pager);
+  await load();
 }
 
 /* ============================== users (admin) ============================== */
