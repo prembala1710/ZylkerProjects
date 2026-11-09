@@ -45,7 +45,7 @@ const PROJECT_STATUS_LABEL = { planning: 'Planning', active: 'Active', on_hold: 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const ROLES = ['viewer', 'member', 'manager', 'admin'];
 
-const state = { token: null, me: null, meta: null, users: [], projects: [], today: '', pendingTask: null, projectCache: {} };
+const state = { token: null, me: null, meta: null, users: [], projects: [], fields: [], today: '', pendingTask: null, projectCache: {} };
 
 const parseDate = (s) => { if (!s) return null; const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const dayDiff = (a, b) => Math.round((parseDate(b) - parseDate(a)) / 86400000);
@@ -174,6 +174,81 @@ async function guarded(button, fn) {
   try { return await fn(); } catch (e) { toast(e.message, 'error'); } finally { button.disabled = false; }
 }
 
+/* ============================== custom project fields ============================== */
+const FIELD_TYPE_LABEL = { text: 'Text', number: 'Number', url: 'URL' };
+const fieldLabel = (key) => { const f = state.fields.find((x) => x.key === key); return f ? f.label : key; };
+const fmtNumber = (n, decimals) => new Intl.NumberFormat(undefined, { maximumFractionDigits: decimals ?? 3 }).format(n);
+const decimalPlaces = (text) => { const m = /^-?\d*\.(\d+)$/.exec(text); return m ? m[1].length : 0; };
+// Only http(s) addresses ever become links. Anything else (javascript:, data:, ...) is shown as plain text.
+function safeUrl(value) {
+  try { const u = new URL(value); return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null; } catch (e) { return null; }
+}
+function fieldValue(def, value) {
+  if (value === null || value === undefined || value === '') return h('span', { class: 'muted', text: '\u2014' });
+  if (def.type === 'number') return h('span', { text: fmtNumber(value, def.decimals) });
+  if (def.type === 'url') {
+    const href = safeUrl(value);
+    return href ? h('a', { href, target: '_blank', rel: 'noopener noreferrer nofollow', class: 'cf-link ellipsis', title: value, text: value }) : h('span', { text: value });
+  }
+  return h('span', { text: value });
+}
+function fieldRules(def) {
+  if (def.type === 'text') return `Up to ${def.max_length} characters`;
+  if (def.type === 'url') return 'http:// or https:// address';
+  const bits = [def.decimals === 0 ? 'Whole numbers' : `Up to ${plural(def.decimals, 'decimal place')}`];
+  if (def.min_value !== null) bits.push('min ' + fmtNumber(def.min_value, def.decimals));
+  if (def.max_value !== null) bits.push('max ' + fmtNumber(def.max_value, def.decimals));
+  return bits.join(', ');
+}
+// The browser checks these constraints first for instant feedback; the server re-checks all of them.
+function fieldControl(def, value, required) {
+  const shown = value === null || value === undefined ? '' : value;
+  const common = { value: shown, required, autocomplete: 'off', 'aria-describedby': null };
+  if (def.type === 'number') {
+    const el = h('input', { ...common, type: 'number', step: 'any', min: def.min_value, max: def.max_value, inputmode: def.decimals ? 'decimal' : 'numeric' });
+    el.addEventListener('input', () => el.setCustomValidity(decimalPlaces(el.value) > def.decimals ? (def.decimals ? `At most ${plural(def.decimals, 'decimal place')}` : 'Whole numbers only') : ''));
+    return el;
+  }
+  if (def.type === 'url') return h('input', { ...common, type: 'url', maxlength: state.meta.project_field_limits.max_url_length, placeholder: 'https://', inputmode: 'url', spellcheck: 'false', pattern: 'https?://.+', title: 'A web address starting with http:// or https://' });
+  return h('input', { ...common, type: 'text', maxlength: def.max_length });
+}
+// One input per defined field. A required field only blocks saving when the project has (or is getting) a value,
+// so projects that predate the field can still be edited.
+function customFieldsEditor(values, { creating, disabled }) {
+  const controls = {};
+  const node = h('div', { class: 'cf-grid' });
+  for (const def of state.fields) {
+    const current = values ? values[def.key] : null;
+    const el = fieldControl(def, current, def.required && (creating || (current !== null && current !== undefined)));
+    if (disabled) el.disabled = true;
+    controls[def.key] = { def, el };
+    node.append(field(def.label + (def.required ? ' *' : ''), el, def.description || fieldRules(def)));
+  }
+  return { controls, node };
+}
+function readControl(def, el) {
+  const raw = el.value.trim();
+  if (raw === '') return null;
+  return def.type === 'number' ? Number(raw) : raw;
+}
+// Only what changed (or, when creating, what was filled in); null clears a value.
+function collectCustom(controls, current) {
+  const out = {};
+  for (const [key, { def, el }] of Object.entries(controls)) {
+    const value = readControl(def, el);
+    const before = current && current[key] !== undefined ? current[key] : null;
+    if (value !== before) out[key] = value;
+  }
+  return out;
+}
+const controlsValid = (controls) => Object.values(controls).every(({ el }) => el.disabled || el.reportValidity());
+function customFieldSummary(project) {
+  const values = project.custom_fields || {};
+  const shown = state.fields.filter((d) => values[d.key] !== null && values[d.key] !== undefined);
+  if (!shown.length) return null;
+  return h('dl', { class: 'cf-summary' }, shown.map((d) => h('div', { class: 'cf-pair' }, h('dt', { text: d.label }), h('dd', {}, fieldValue(d, values[d.key])))));
+}
+
 /* ============================== session & shell ============================== */
 function saveToken(token, remember) {
   localStorage.removeItem('zpm_token'); sessionStorage.removeItem('zpm_token');
@@ -217,8 +292,8 @@ const logo = () => sv('svg', { width: 28, height: 28, viewBox: '0 0 32 32', 'ari
   sv('path', { d: 'M9 10h14l-9 12h9', fill: 'none', stroke: '#fff', 'stroke-width': 3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
 
 async function loadSession() {
-  const [me, meta, users, projects] = await Promise.all([api('/me'), api('/meta'), api('/users'), api('/projects')]);
-  Object.assign(state, { me, meta, users: users.items, projects: projects.items, today: meta.today });
+  const [me, meta, users, projects, fields] = await Promise.all([api('/me'), api('/meta'), api('/users'), api('/projects'), api('/project-fields')]);
+  Object.assign(state, { me, meta, users: users.items, projects: projects.items, fields: fields.items, today: meta.today });
 }
 async function refreshProjects() {
   state.projects = (await api('/projects')).items;
@@ -263,7 +338,8 @@ function renderShell() {
     h('div', { id: 'project-nav' }),
     hasRole('manager') ? h('button', { class: 'btn small', style: { margin: '8px 10px' }, onclick: openCreateProject }, '+ New project') : null,
     hasRole('admin') ? h('div', { class: 'nav-heading', text: 'Admin' }) : null,
-    hasRole('admin') ? h('a', { class: 'nav-link', href: '#/users', dataset: { route: 'users' } }, 'Users & access') : null);
+    hasRole('admin') ? h('a', { class: 'nav-link', href: '#/users', dataset: { route: 'users' } }, 'Users & access') : null,
+    hasRole('admin') ? h('a', { class: 'nav-link', href: '#/fields', dataset: { route: 'fields' } }, 'Project fields') : null);
 
   const topbar = h('header', { class: 'topbar' }, h('div', { class: 'search' }, searchBox, results), h('span', { class: 'spacer' }),
     avatar(state.me), h('div', { class: 'user-chip' }, h('div', { text: state.me.display_name }), h('div', { class: 'small muted', text: state.me.role })),
@@ -300,6 +376,7 @@ async function route() {
     else if (a === 'mine') await myTasksView(view, alive);
     else if (a === 'team') await teamView(view, alive);
     else if (a === 'users' && hasRole('admin')) await usersView(view, alive);
+    else if (a === 'fields' && hasRole('admin')) await fieldsView(view, alive);
     else await dashboardView(view, alive);
   } catch (e) {
     if (!alive() || !state.token) return;
@@ -422,8 +499,9 @@ function taskTable(tasks, opts = {}) {
 const TABS = [['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline'], ['milestones', 'Milestones'], ['reports', 'Reports'], ['activity', 'Activity'], ['settings', 'Settings']];
 
 async function projectView(view, key, tab, alive) {
-  const [project, summary] = await Promise.all([api('/projects/' + key), api(`/projects/${key}/summary`)]);
+  const [project, summary, fields] = await Promise.all([api('/projects/' + key), api(`/projects/${key}/summary`), api('/project-fields')]);
   state.projectCache[key] = project;
+  state.fields = fields.items; // another admin may have changed the definitions since sign-in
   if (!alive()) return;
   if (!TABS.some(([id]) => id === tab)) tab = 'board';
   clear(view);
@@ -435,6 +513,7 @@ async function projectView(view, key, tab, alive) {
       h('div', { class: 'titles' }, h('div', { class: 'row wrap' }, h('h1', { text: project.name }), badge(project.status, PROJECT_STATUS_LABEL[project.status]), healthBadge(s.health)),
         h('p', { class: 'muted' }, `${project.key} \u00b7 owner ${project.owner ? project.owner.display_name : '\u2014'} \u00b7 ${fmtDate(project.start_date)} \u2192 ${fmtDate(project.due_date)}`),
         project.description ? h('p', { class: 'small', text: project.description }) : null,
+        customFieldSummary(project),
         s.health.reasons.length ? h('ul', { class: 'reasons' }, s.health.reasons.map((r) => h('li', { text: r }))) : null),
       h('div', { style: { minWidth: '220px' } }, h('div', { class: 'row' }, progressBar(s.progress.tasks_pct, 'ok'), h('strong', { text: `${Math.round(s.progress.tasks_pct)}%` })),
         h('div', { class: 'small muted', text: `${m.done}/${m.leaf_tasks} done \u00b7 ${m.overdue} overdue \u00b7 ${m.blocked} waiting/blocked` })),
@@ -718,7 +797,8 @@ function criticalPathCard(cp) {
 function describeActivity(a) {
   const d = a.details || {};
   const t = a.task || '';
-  const change = (c) => Object.entries(c || {}).map(([f, [o, n]]) => `${f.replace('_', ' ')}: ${Array.isArray(o) ? o.join(', ') || 'none' : o ?? 'none'} \u2192 ${Array.isArray(n) ? n.join(', ') || 'none' : n ?? 'none'}`).join('; ');
+  const name = (f) => (f.startsWith('custom_fields.') ? fieldLabel(f.slice('custom_fields.'.length)) : f.replace('_', ' '));
+  const change = (c) => Object.entries(c || {}).map(([f, [o, n]]) => `${name(f)}: ${Array.isArray(o) ? o.join(', ') || 'none' : o ?? 'none'} \u2192 ${Array.isArray(n) ? n.join(', ') || 'none' : n ?? 'none'}`).join('; ');
   switch (a.action) {
     case 'task.created': return `created ${t} \u201c${d.title}\u201d`;
     case 'task.updated': return `updated ${t} (${change(d.changes)})`;
@@ -736,6 +816,9 @@ function describeActivity(a) {
     case 'milestone.deleted': return `deleted milestone \u201c${d.name}\u201d`;
     case 'project.created': return `created the project`;
     case 'project.updated': return `updated the project (${change(d.changes)})`;
+    case 'project_field.created': return `defined the ${FIELD_TYPE_LABEL[d.type] || ''} project field \u201c${d.label}\u201d`;
+    case 'project_field.updated': return `changed the project field \u201c${fieldLabel(d.key)}\u201d (${change(d.changes)})`;
+    case 'project_field.deleted': return `deleted the project field \u201c${d.label}\u201d (removed ${plural(d.values_removed, 'value')})`;
     case 'project.member_added': return `added ${d.user} to the project`;
     case 'project.member_removed': return `removed ${d.user} from the project`;
     case 'import.completed': return `imported tasks from CSV: ${d.created} created, ${d.skipped_duplicates} skipped, ${d.errors} errors`;
@@ -770,8 +853,13 @@ async function settingsTab(root, ctx) {
     owner: h('select', { value: project.owner ? project.owner.username : '', disabled: !manage }, optionList(userPairs(project.members, '\u2014'))),
     description: h('textarea', { maxlength: 5000, value: project.description, disabled: !manage }),
   };
+  const cf = state.fields.length ? customFieldsEditor(project.custom_fields, { creating: false, disabled: !manage }) : null;
   const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => {
-    await api('/projects/' + key, { method: 'PATCH', body: { name: inputs.name.value, status: inputs.status.value, start_date: inputs.start_date.value || null, due_date: inputs.due_date.value || null, owner: inputs.owner.value || null, description: inputs.description.value } });
+    if (cf && !controlsValid(cf.controls)) return;
+    const body = { name: inputs.name.value, status: inputs.status.value, start_date: inputs.start_date.value || null, due_date: inputs.due_date.value || null, owner: inputs.owner.value || null, description: inputs.description.value };
+    const changed = cf ? collectCustom(cf.controls, project.custom_fields) : {};
+    if (Object.keys(changed).length) body.custom_fields = changed;
+    await api('/projects/' + key, { method: 'PATCH', body });
     toast('Project saved', 'ok'); await refreshProjects(); route();
   }) }, 'Save changes');
   const memberList = h('div');
@@ -785,7 +873,10 @@ async function settingsTab(root, ctx) {
   renderMembers();
   put(root, h('div', { class: 'grid two' },
     h('div', { class: 'card stack' }, h('h2', { text: 'Project details' }), h('div', { class: 'form-grid' }, field('Name', inputs.name), field('Status', inputs.status), field('Start date', inputs.start_date), field('Due date', inputs.due_date), field('Owner', inputs.owner)),
-      field('Description', inputs.description), manage ? h('div', {}, save) : h('p', { class: 'small muted', text: 'Only managers and admins can edit project details.' })),
+      field('Description', inputs.description),
+      cf ? h('div', { class: 'stack' }, h('div', { class: 'cf-heading', text: 'Custom fields' }), cf.node)
+        : hasRole('admin') ? h('p', { class: 'small muted' }, 'No custom fields yet. ', h('a', { href: '#/fields', text: 'Define some' }), ' to track extra details such as a client, a budget or a wiki link.') : null,
+      manage ? h('div', {}, save) : h('p', { class: 'small muted', text: 'Only managers and admins can edit project details.' })),
     h('div', { class: 'card' }, h('h2', { text: 'Members' }), h('p', { class: 'small muted', text: 'Members can be assigned work and can edit tasks in this project.' }), memberList,
       manage ? h('div', { class: 'row', style: { marginTop: '10px' } }, addSel, h('button', { class: 'btn', onclick: (e) => guarded(e.target, async () => { if (!addSel.value) return; Object.assign(project, await api(`/projects/${key}/members`, { method: 'POST', body: { username: addSel.value } })); route(); }) }, 'Add')) : null)),
     manage ? importCard(key) : null,
@@ -849,15 +940,21 @@ function openCreateProject() {
     status: h('select', { value: 'active' }, optionList(state.meta.project_statuses.filter((s) => s !== 'archived').map((s) => [s, PROJECT_STATUS_LABEL[s]]))),
     start_date: h('input', { type: 'date' }), due_date: h('input', { type: 'date' }), description: h('textarea', {}),
   };
+  const cf = state.fields.length ? customFieldsEditor(null, { creating: true }) : null;
   const checks = state.users.filter((u) => u.username !== state.me.username).map((u) => [u, h('input', { type: 'checkbox' })]);
   const create = h('button', { class: 'btn primary', onclick: () => guarded(create, async () => {
+    if (cf && !controlsValid(cf.controls)) return;
     const body = { key: f.key.value, name: f.name.value, status: f.status.value, description: f.description.value, members: checks.filter(([, c]) => c.checked).map(([u]) => u.username) };
     for (const k of ['start_date', 'due_date']) if (f[k].value) body[k] = f[k].value;
+    const custom = cf ? collectCustom(cf.controls, null) : {};
+    if (Object.keys(custom).length) body.custom_fields = custom;
     const p = await api('/projects', { method: 'POST', body });
     m.close(); await refreshProjects(); location.hash = '#/p/' + p.key; toast(`Project ${p.key} created`, 'ok');
   }) }, 'Create project');
   const m = openModal({ title: 'New project', content: h('div', { class: 'stack' }, h('div', { class: 'form-grid' }, field('Key', f.key, '2\u201310 letters or digits; prefixes task keys'), field('Name', f.name), field('Status', f.status), field('Start date', f.start_date), field('Due date', f.due_date)),
-    field('Description', f.description), h('div', {}, h('div', { class: 'small muted', text: 'Members (you are added automatically)' }), h('div', { class: 'row wrap' }, checks.map(([u, c]) => h('label', { class: 'row small' }, c, u.display_name))))),
+    field('Description', f.description),
+    cf ? h('div', { class: 'stack' }, h('div', { class: 'cf-heading', text: 'Custom fields' }), cf.node) : null,
+    h('div', {}, h('div', { class: 'small muted', text: 'Members (you are added automatically)' }), h('div', { class: 'row wrap' }, checks.map(([u, c]) => h('label', { class: 'row small' }, c, u.display_name))))),
     footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), create] });
 }
 
@@ -1015,6 +1112,91 @@ function openCreateUser() {
     m.close(); state.users = (await api('/users')).items; showToken(r.user.username, r.token); route();
   }) }, 'Create user');
   const m = openModal({ title: 'New user', narrow: true, content: h('div', { class: 'stack' }, field('Username', f.username), field('Display name', f.display_name), field('E-mail (optional)', f.email), h('div', { class: 'form-grid' }, field('Role', f.role), field('Weekly capacity (h)', f.weekly_capacity_hours))), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), create] });
+}
+
+/* ============================== admin: project fields ============================== */
+async function fieldsView(view, alive) {
+  const data = await api('/project-fields');
+  if (!alive()) return;
+  state.fields = data.items;
+  clear(view);
+  const full = data.items.length >= state.meta.project_field_limits.max_fields;
+  view.append(h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('h1', { text: 'Project fields' }),
+    h('p', { class: 'muted', text: 'Extra details every project can carry, such as a client, a budget or a wiki link. Managers fill them in on the project\u2019s Settings tab.' })),
+    h('button', { class: 'btn primary', disabled: full, title: full ? `At most ${state.meta.project_field_limits.max_fields} fields` : null, onclick: () => openFieldDialog(null) }, '+ New field')),
+    data.items.length
+      ? h('div', { class: 'card flush' }, h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['Field', 'Key', 'Type', 'Rules', 'Required', ''].map((x) => h('th', { text: x })))),
+        h('tbody', {}, data.items.map((f) => h('tr', {},
+          h('td', {}, h('strong', { text: f.label }), f.description ? h('div', { class: 'small muted', text: f.description }) : null),
+          h('td', {}, h('code', { text: f.key })), h('td', {}, h('span', { class: 'chip', text: FIELD_TYPE_LABEL[f.type] })), h('td', { class: 'small', text: fieldRules(f) }),
+          h('td', {}, f.required ? badge('active', 'Required') : h('span', { class: 'muted', text: '\u2014' })),
+          h('td', { class: 'right nowrap' }, h('button', { class: 'btn small', onclick: () => openFieldDialog(f) }, 'Edit'), ' ', h('button', { class: 'btn small danger', onclick: () => deleteFieldDialog(f) }, 'Delete')))))))
+      : h('div', { class: 'card empty' }, h('h2', { text: 'No project fields yet' }), h('p', { text: 'Add a text, number or URL field and it appears on every project.' })));
+}
+async function fieldsChanged(message) {
+  state.fields = (await api('/project-fields')).items;
+  state.projectCache = {};
+  toast(message, 'ok');
+  route();
+}
+const slugify = (text) => text.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '_').replace(/^[^a-z]+/, '').replace(/_+$/, '').slice(0, 40);
+
+function openFieldDialog(def) {
+  const editing = !!def;
+  const limits = state.meta.project_field_limits;
+  const f = {
+    label: h('input', { type: 'text', maxlength: 50, required: true, value: editing ? def.label : '', placeholder: 'e.g. Client' }),
+    key: h('input', { type: 'text', maxlength: 40, required: true, disabled: editing, value: editing ? def.key : '', pattern: '[a-z][a-z0-9_]{1,39}', title: 'Lower-case letters, digits and underscores, starting with a letter' }),
+    type: h('select', { value: editing ? def.type : 'text', disabled: editing }, optionList(state.meta.project_field_types.map((t) => [t, FIELD_TYPE_LABEL[t]]))),
+    description: h('input', { type: 'text', maxlength: 200, value: editing ? def.description : '', placeholder: 'Help text shown under the input' }),
+    required: h('input', { type: 'checkbox', checked: editing && def.required }),
+    max_length: h('input', { type: 'number', min: 1, max: limits.max_text_length, step: 1, value: editing && def.max_length !== null ? def.max_length : limits.default_max_length }),
+    decimals: h('select', { value: String(editing && def.decimals !== null ? def.decimals : limits.default_decimals) }, optionList(Array.from({ length: limits.max_decimals + 1 }, (_, n) => [String(n), String(n)]))),
+    min_value: h('input', { type: 'number', step: 'any', value: editing && def.min_value !== null ? def.min_value : '' }),
+    max_value: h('input', { type: 'number', step: 'any', value: editing && def.max_value !== null ? def.max_value : '' }),
+  };
+  let keyEdited = false;
+  f.key.addEventListener('input', () => { keyEdited = true; });
+  f.label.addEventListener('input', () => { if (!editing && !keyEdited) f.key.value = slugify(f.label.value); });
+  const panels = {
+    text: h('div', { class: 'form-grid' }, field('Maximum length', f.max_length, `1\u2013${limits.max_text_length} characters`)),
+    number: h('div', { class: 'form-grid' }, field('Decimal places', f.decimals), field('Minimum (optional)', f.min_value), field('Maximum (optional)', f.max_value)),
+    url: h('p', { class: 'small muted', text: 'Only http:// and https:// addresses are accepted. They open in a new tab.' }),
+  };
+  const sync = () => { for (const [type, panel] of Object.entries(panels)) panel.classList.toggle('hidden', type !== f.type.value); };
+  f.type.addEventListener('change', sync);
+  sync();
+
+  const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => {
+    const type = f.type.value;
+    const check = [f.label, f.key, ...(type === 'text' ? [f.max_length] : []), ...(type === 'number' ? [f.min_value, f.max_value] : [])];
+    if (!check.every((el) => el.disabled || el.reportValidity())) return;
+    const body = { label: f.label.value.trim(), description: f.description.value.trim(), required: f.required.checked };
+    if (!editing) Object.assign(body, { key: f.key.value, type });
+    if (type === 'text') body.max_length = Number(f.max_length.value);
+    if (type === 'number') {
+      Object.assign(body, { decimals: Number(f.decimals.value), min_value: f.min_value.value === '' ? null : Number(f.min_value.value), max_value: f.max_value.value === '' ? null : Number(f.max_value.value) });
+      if (body.min_value !== null && body.max_value !== null && body.min_value > body.max_value) { toast('The minimum cannot be greater than the maximum', 'error'); return; }
+    }
+    await api(editing ? '/project-fields/' + def.key : '/project-fields', { method: editing ? 'PATCH' : 'POST', body });
+    m.close();
+    await fieldsChanged(editing ? 'Field saved' : 'Field created');
+  }) }, editing ? 'Save changes' : 'Create field');
+  const m = openModal({ title: editing ? `Edit \u201c${def.label}\u201d` : 'New project field', content: h('div', { class: 'stack' },
+    h('div', { class: 'form-grid' }, field('Label', f.label), field('Key', f.key, editing ? 'Cannot be changed' : 'Used by the API; letters, digits, underscores'), field('Type', f.type, editing ? 'Cannot be changed' : null)),
+    panels.text, panels.number, panels.url, field('Description (optional)', f.description),
+    h('label', { class: 'row small' }, f.required, 'Required when creating a project (existing projects are not affected)')), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
+}
+function deleteFieldDialog(def) {
+  const input = h('input', { type: 'text', placeholder: def.key, 'aria-label': 'Type the field key to confirm', autocomplete: 'off' });
+  const go = h('button', { class: 'btn danger', disabled: true, onclick: () => guarded(go, async () => {
+    await api('/project-fields/' + def.key, { method: 'DELETE', query: { confirm: def.key } });
+    m.close();
+    await fieldsChanged('Field deleted');
+  }) }, 'Delete forever');
+  input.addEventListener('input', () => { go.disabled = input.value !== def.key; });
+  const m = openModal({ title: `Delete \u201c${def.label}\u201d?`, narrow: true, content: h('div', { class: 'stack' },
+    h('p', { text: `This removes the field and its value from every project. It cannot be undone. Type ${def.key} to confirm.` }), input), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), go] });
 }
 
 /* ============================== boot ============================== */
