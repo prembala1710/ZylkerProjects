@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from ..errors import Forbidden, NotFound, ValidationError
 from ..util import Checker, truncate
-from . import activity, projects, taskrefs, users
+from . import activity, projects, taskrefs, users, watchers
 
 MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9._-]{1,31})", re.IGNORECASE)
 
@@ -76,6 +76,12 @@ def add_comment(ctx, key, data):
         ctx.emit(
             "mention", key=taskrefs.key_of(row), title=row["title"], mentioned=user["display_name"],
             actor=ctx.actor_name, excerpt=truncate(body, 140),
+        )  # fmt: skip
+    following = watchers.names_to_notify(ctx, row["id"], exclude=[u["id"] for u in mentions])  # mentioned people already know
+    if following:
+        ctx.emit(
+            "task_watched", key=taskrefs.key_of(row), title=row["title"], actor=ctx.actor_name, watchers=following,
+            summary="commented \u201c%s\u201d" % truncate(body, 140),
         )  # fmt: skip
     comment = ctx.conn.execute(COMMENT_SELECT + "WHERE c.id = ?", (cur.lastrowid,)).fetchone()
     return _comment_dict(comment)
