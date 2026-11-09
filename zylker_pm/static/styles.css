@@ -40,12 +40,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .btn.danger { color: var(--bad); border-color: var(--bad); } .btn.small { padding: 2px 8px; font-size: 12px; }
 .btn.ghost { border-color: transparent; background: transparent; } .btn.ghost:hover { background: var(--gray-soft); }
 :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-input[type=text], input[type=password], input[type=date], input[type=number], input[type=search], input[type=email], select, textarea {
+input[type=text], input[type=password], input[type=date], input[type=number], input[type=search], input[type=email], input[type=url], select, textarea {
   width: 100%; padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 textarea { min-height: 90px; resize: vertical; }
 input[type=checkbox] { width: auto; }
 label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
 label.field > * { font-weight: 400; color: var(--text); }
+label.field > .muted { color: var(--muted); }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
 .error-text { color: var(--bad); font-size: 13px; }
 
@@ -192,3 +193,13 @@ svg.chart { width: 100%; height: auto; display: block; } svg.chart text { fill: 
 .tl-ms { fill: var(--warn); } .tl-row:hover rect.hit { fill: var(--surface-2); } rect.hit { fill: transparent; cursor: pointer; }
 .tl-label { fill: var(--text) !important; font-size: 12px !important; }
 .util-cell { min-width: 140px; }
+
+/* custom project fields */
+.cf-heading { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.cf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.cf-summary { display: flex; flex-wrap: wrap; gap: 2px 18px; margin: 8px 0 0; font-size: 13px; min-width: 0; }
+.cf-pair { display: flex; gap: 6px; min-width: 0; max-width: 100%; }
+.cf-pair dt { color: var(--muted); } .cf-pair dt::after { content: ":"; }
+.cf-pair dd { margin: 0; min-width: 0; overflow-wrap: anywhere; } /* a long unbroken value must wrap, not widen the page */
+.cf-link { display: inline-block; max-width: min(300px, 100%); vertical-align: bottom; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--gray-soft); padding: 1px 5px; border-radius: 4px; }
