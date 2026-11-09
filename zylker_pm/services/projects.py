@@ -5,7 +5,7 @@ from __future__ import annotations
 from ..domain import OPEN_SQL, PROJECT_STATUSES
 from ..errors import Conflict, Forbidden, NotFound, ValidationError
 from ..util import PROJECT_KEY_RE, Checker, escape_like
-from . import activity, users
+from . import activity, project_fields, users
 
 PROJECT_SELECT = (
     "SELECT p.*, o.username AS o_username, o.display_name AS o_name, "
@@ -56,7 +56,10 @@ def member_rows(conn, project_id):
     ).fetchall()
 
 
-def to_dict(ctx, row, detail=False):
+def to_dict(ctx, row, detail=False, custom=None):
+    """``custom`` is the project's ``{field_key: value}`` map; pass it when serialising many rows at once."""
+    if custom is None:
+        custom = project_fields.values_map(ctx.conn, [row["id"]])[row["id"]]
     data = {
         "key": row["key"],
         "name": row["name"],
@@ -66,6 +69,7 @@ def to_dict(ctx, row, detail=False):
         "start_date": row["start_date"],
         "due_date": row["due_date"],
         "task_counts": {"total": row["n_total"], "open": row["n_open"], "done": row["n_done"]},
+        "custom_fields": custom,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -94,6 +98,25 @@ def _check_dates(start, due):
         raise ValidationError({"due_date": "must not be before start_date"})
 
 
+def _validated(ctx, checker, *, creating):
+    """Run the field checker and the custom-field validation together, so one 422 lists every problem."""
+    errors, v = {}, {}
+    try:
+        v = checker.result()
+    except ValidationError as exc:
+        errors.update(exc.details)
+    custom = {}
+    if "custom_fields" not in errors:
+        try:
+            custom = project_fields.validate_input(ctx.conn, checker.data.get("custom_fields"), creating=creating)
+        except ValidationError as exc:
+            errors.update(exc.details)
+    if errors:
+        raise ValidationError(errors)
+    v.pop("custom_fields", None)
+    return v, custom
+
+
 def list_projects(ctx, params):
     where, args = [], []
     statuses = [s for s in (params.get("status") or "").split(",") if s]
@@ -107,8 +130,11 @@ def list_projects(ctx, params):
         where.append("p.status <> 'archived'")
     q = (params.get("q") or "").strip()
     if q:
-        where.append("(p.name LIKE ? ESCAPE '\\' OR p.key LIKE ? ESCAPE '\\')")
-        args += ["%" + escape_like(q) + "%"] * 2
+        where.append(
+            "(p.name LIKE ? ESCAPE '\\' OR p.key LIKE ? ESCAPE '\\' OR p.id IN "
+            "(SELECT v.project_id FROM project_field_values v WHERE v.text_value LIKE ? ESCAPE '\\'))"
+        )
+        args += ["%" + escape_like(q) + "%"] * 3
     member = params.get("member")
     if member:
         if member == "me" and ctx.user is not None:
@@ -119,11 +145,13 @@ def list_projects(ctx, params):
         where.append("p.id IN (SELECT project_id FROM project_members WHERE user_id = ?)")
         args.append(uid)
     sql = PROJECT_SELECT + ("WHERE " + " AND ".join(where) + " " if where else "") + "ORDER BY p.key"
-    return [to_dict(ctx, r) for r in ctx.conn.execute(sql, args)]
+    rows = ctx.conn.execute(sql, args).fetchall()
+    custom = project_fields.values_map(ctx.conn, [r["id"] for r in rows])
+    return [to_dict(ctx, r, custom=custom[r["id"]]) for r in rows]
 
 
 def create_project(ctx, data):
-    c = Checker(data, {"key", "name", "description", "status", "owner", "start_date", "due_date", "members"})
+    c = Checker(data, {"key", "name", "description", "status", "owner", "start_date", "due_date", "members", "custom_fields"})
     c.text("key", required=True, min_len=2, max_len=10)
     c.text("name", required=True, min_len=1, max_len=100)
     c.text("description", max_len=5000)
@@ -132,7 +160,8 @@ def create_project(ctx, data):
     c.date("start_date")
     c.date("due_date")
     c.raw("members")
-    v = c.result()
+    c.raw("custom_fields")
+    v, custom = _validated(ctx, c, creating=True)
     key = v["key"].upper()
     if not PROJECT_KEY_RE.match(key):
         raise ValidationError({"key": "2-10 characters, start with a letter, letters and digits only"})
@@ -172,20 +201,25 @@ def create_project(ctx, data):
     )
     for uid in members:
         ctx.conn.execute("INSERT INTO project_members (project_id, user_id) VALUES (?,?)", (cur.lastrowid, uid))
-    activity.log(ctx, "project.created", project_id=cur.lastrowid, details={"key": key, "name": v["name"]})
+    stored = project_fields.store(ctx, cur.lastrowid, custom)
+    details = {"key": key, "name": v["name"]}
+    if stored:
+        details["custom_fields"] = {k.split(".", 1)[1]: new for k, (_, new) in stored.items()}
+    activity.log(ctx, "project.created", project_id=cur.lastrowid, details=details)
     return get_project(ctx, key)
 
 
 def update_project(ctx, key, data):
     row = get_row(ctx.conn, key)
-    c = Checker(data, {"name", "description", "status", "owner", "start_date", "due_date"}, partial=True)
+    c = Checker(data, {"name", "description", "status", "owner", "start_date", "due_date", "custom_fields"}, partial=True)
     c.text("name", min_len=1, max_len=100)
     c.text("description", max_len=5000)
     c.choice("status", PROJECT_STATUSES)
     c.raw("owner")
     c.date("start_date")
     c.date("due_date")
-    v = c.result()
+    c.raw("custom_fields")
+    v, custom = _validated(ctx, c, creating=False)
     _check_dates(v.get("start_date", row["start_date"]), v.get("due_date", row["due_date"]))
 
     if "owner" in v:
@@ -212,13 +246,17 @@ def update_project(ctx, key, data):
             )
 
     changes = {f: [row[f], val] for f, val in v.items() if row[f] != val}
-    if changes:
-        sets = ", ".join("%s = ?" % f for f in changes)
-        ctx.conn.execute(
-            "UPDATE projects SET %s, updated_at = ? WHERE id = ?" % sets,
-            [c_[1] for c_ in changes.values()] + [ctx.now_iso, row["id"]],
-        )
-        activity.log(ctx, "project.updated", project_id=row["id"], details={"changes": changes})
+    custom_changes = project_fields.store(ctx, row["id"], custom)
+    if changes or custom_changes:
+        if changes:
+            sets = ", ".join("%s = ?" % f for f in changes)
+            ctx.conn.execute(
+                "UPDATE projects SET %s, updated_at = ? WHERE id = ?" % sets,
+                [c_[1] for c_ in changes.values()] + [ctx.now_iso, row["id"]],
+            )
+        else:
+            ctx.conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (ctx.now_iso, row["id"]))
+        activity.log(ctx, "project.updated", project_id=row["id"], details={"changes": {**changes, **custom_changes}})
         if "status" in changes:
             ctx.emit(
                 "project_status_changed",

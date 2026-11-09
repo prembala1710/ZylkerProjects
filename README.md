@@ -22,6 +22,8 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **Roles and an audit trail** - viewer / member / manager / admin, per-project membership, and a field-level history of every change.
 - **Zoho Cliq notifications** (optional) - assignments, completions, blockers, @mentions and a scheduled overdue digest.
 - **CSV import / export** - bring in a Jira-style export (with a dry run) or take your data out.
+- **Custom project fields** - admins define extra text, number and URL fields (a client, a budget, a wiki link); managers fill them in
+  per project (see [Custom project fields](#custom-project-fields)).
 
 ## Quick start
 
@@ -64,6 +66,33 @@ All settings are environment variables; nothing is read from the repository.
 | `ZYLKER_CLIQ_ENDPOINT` | *(empty = notifications off)* | A Cliq **incoming webhook URL**. It contains a key - treat it as a secret. Must be `https` (plain `http` only for localhost) |
 | `ZYLKER_CLIQ_BOT_UNIQUE_NAME` | *(empty)* | Post as this bot (appended as `bot_unique_name`, the same convention as the repository's GitHub Informer workflow) |
 
+## Custom project fields
+
+Every organisation has different things it wants to know about a project. Admins define **fields** under *Admin -> Project fields*
+(or `POST /api/project-fields`); every project then carries a value for each one, edited by managers on the project's *Settings* tab
+and shown in the project header. At most 20 fields.
+
+| Type | Holds | Rules you can set |
+|---|---|---|
+| **Text** | One line of text | Maximum length (1-2000, default 255) |
+| **Number** | Integers or decimals | Decimal places (0-3, default 2), optional minimum and maximum |
+| **URL** | A web address | `http://` or `https://` only |
+
+- **Strict, server-side validation.** Wrong types, control characters, too many decimal places (refused, never rounded), values outside
+  the range, and any URL that is not plain `http(s)` with a host name - `javascript:`, `data:`, `//host`, embedded passwords,
+  backslashes, spaces - are all rejected with a per-field message. The browser checks the same rules first for instant feedback.
+- **Safe display.** Values are inserted as text; a URL becomes a link (opening in a new tab with `rel="noopener noreferrer nofollow"`) only
+  if it is `http(s)`.
+- **Required fields** must be filled in when a project is created and can never be cleared. Projects that existed before the field was
+  made required stay editable until someone fills it in.
+- **Safe changes.** The key and type of a field are permanent. A limit cannot be tightened past values projects already hold, and deleting
+  a field needs the key typed back because it removes that value from every project.
+- **Audited.** Value changes appear in the project's activity feed (`Client: Acme -> Beta`); definition changes in the admin audit trail.
+- **Searchable.** The project search box also matches text and URL values.
+
+Databases created by an earlier release are upgraded automatically the first time they are opened (schema v1 to v2, in one transaction;
+a failed upgrade changes nothing).
+
 ## Roles
 
 | Role | Can |
@@ -71,7 +100,7 @@ All settings are environment variables; nothing is read from the repository.
 | **viewer** | Read everything: projects, tasks, reports, exports |
 | **member** | Viewer + create/edit tasks, comment, log time and link dependencies **in projects they belong to** |
 | **manager** | Member + everything in *any* project: create and edit projects, manage members and milestones, delete tasks, import CSV, see everyone's timesheet |
-| **admin** | Manager + manage users and roles, delete projects, read the global audit trail |
+| **admin** | Manager + manage users and roles, define custom project fields, delete projects, read the global audit trail |
 
 Project membership also controls who can be *assigned* work. Archived projects are read-only for all roles.
 The server is the authority: the UI hides controls a role cannot use, but every rule is enforced in the API.
@@ -192,9 +221,9 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~180 tests, no dependencies
+python -m unittest discover -s tests -v     # ~230 tests, no dependencies
 pip install playwright && playwright install chromium
-python -m unittest tests.test_ui_e2e -v      # 18 real-browser tests (skipped automatically without Playwright)
+python -m unittest tests.test_ui_e2e -v      # 25 real-browser tests (skipped automatically without Playwright)
 ```
 
 The backend tests include hand-computed expectations for the critical path, workload, burndown and health rules, deadlock
@@ -205,15 +234,15 @@ fails if an endpoint, setting or CLI command is undocumented. `docs/API.md` is t
 zylker_pm/
   app.py routes.py     WSGI app, routing, auth, per-request transactions, security headers
   services/            all business rules (tasks, graph, projects, reports, csvio, ...)
-  notify.py            Cliq notifier; db.py schema; seed.py demo data; cli.py commands
+  notify.py            Cliq notifier; db.py schema + migrations; seed.py demo data; cli.py commands
   static/              the single-page UI (index.html, app.js, styles.css)
 tests/                 unit, HTTP, CLI and browser tests
 ```
 
 ## Limitations and ideas for later
 
-Dependencies are finish-to-start and within one project; there are no custom fields, recurring tasks, task templates or
-attachments; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), recurring tasks, task templates or
+attachments; custom project fields cannot be reordered or filtered on yet; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*

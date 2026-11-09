@@ -27,7 +27,7 @@ Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric
 | Endpoint | Role | Notes |
 |---|---|---|
 | `GET /api/health` | public | `{"status": "ok", "version": ...}` - for load balancers |
-| `GET /api/meta` | viewer | Enumerations, the workflow transition map, server `today` and timezone |
+| `GET /api/meta` | viewer | Enumerations, the workflow transition map, server `today` and timezone, custom-field types and limits |
 | `GET /api/me` | viewer | The authenticated user |
 
 ## Users
@@ -44,10 +44,10 @@ Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/projects` | viewer | `?status=a,b` `?q=` `?member=me` `?include_archived=true`. Archived are hidden by default |
-| `POST /api/projects` | manager | `{key, name, description?, status?, owner?, start_date?, due_date?, members?: [username]}`. Key: 2-10 chars, letters/digits, starts with a letter |
-| `GET /api/projects/{key}` | viewer | Includes `members` and `task_counts` |
-| `PATCH /api/projects/{key}` | manager | A project cannot be set to `completed` while it has open tasks |
+| `GET /api/projects` | viewer | `?status=a,b` `?q=` (matches name, key and the text/URL custom fields) `?member=me` `?include_archived=true`. Archived are hidden by default |
+| `POST /api/projects` | manager | `{key, name, description?, status?, owner?, start_date?, due_date?, members?: [username], custom_fields?: {field_key: value}}`. Key: 2-10 chars, letters/digits, starts with a letter. Required [custom fields](#project-custom-fields) must be supplied |
+| `GET /api/projects/{key}` | viewer | Includes `members`, `task_counts` and `custom_fields` (`{field_key: value \| null}` with an entry for every defined field) |
+| `PATCH /api/projects/{key}` | manager | A project cannot be set to `completed` while it has open tasks. `custom_fields` is merged: only the keys you send change, `null` (or an empty string) clears one |
 | `DELETE /api/projects/{key}` | admin | Permanent. Requires `?confirm=<KEY>` |
 | `POST /api/projects/{key}/members` | manager | `{username}`. Idempotent |
 | `DELETE /api/projects/{key}/members/{username}` | manager | Refused while the member has open tasks, or is the owner |
@@ -61,6 +61,37 @@ Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric
 | `GET /api/projects/{key}/export.csv` | viewer | All tasks as CSV (UTF-8 with BOM). Cells that could be read as spreadsheet formulas are prefixed with `'` |
 | `POST /api/projects/{key}/import` | manager | Body is CSV (`Content-Type: text/csv`, up to 5 MB / 5,000 rows). `?dry_run=true` validates without saving, `?add_missing_members=true` |
 | `POST /api/projects/{key}/tasks` | member | See *Task fields* below |
+
+## Project custom fields
+
+Organisation-wide extra fields that every project can carry. Admins define them; managers fill in the values through
+`custom_fields` on `POST /api/projects` and `PATCH /api/projects/{key}`. Viewers and members can read them.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/project-fields` | viewer | All definitions, oldest first |
+| `POST /api/project-fields` | admin | `{key, label, type, description?, required?, max_length?, min_value?, max_value?, decimals?}`. At most 20 fields |
+| `PATCH /api/project-fields/{field_key}` | admin | Any of `label`, `description`, `required`, `max_length`, `min_value`, `max_value`, `decimals`. `key` and `type` can never change. A limit cannot be tightened past values projects already hold (409 `existing_values_invalid`) |
+| `DELETE /api/project-fields/{field_key}` | admin | Also removes the field's value from every project. Requires `?confirm=<field_key>` |
+
+Definition fields: `key` (2-40 chars, lower-case letters, digits and `_`, starting with a letter) is the stable identifier used in
+`custom_fields`; `label` (1-50 chars, unique ignoring case) is what people see; `type` is one of:
+
+| Type | Value | Settings |
+|---|---|---|
+| `text` | One line of text, no control characters | `max_length` 1-2000 (default 255) |
+| `number` | A JSON number (not a string) | `min_value`, `max_value` (within +/-1e12), `decimals` 0-3 (default 2). More decimal places than allowed are refused, never rounded |
+| `url` | An absolute `http://` or `https://` address, up to 2000 chars | none |
+
+URLs must have a host name (use the punycode form for internationalised names), and must not contain a username or password,
+whitespace, backslashes or quotes. Other schemes such as `javascript:` or `data:` are refused.
+
+**Required fields** must be supplied when a project is created and can never be cleared afterwards. Projects that already existed
+when a field was made required are left alone until someone edits that field, so adding a required field never breaks old projects.
+
+Every problem is reported at once, keyed `custom_fields.<field_key>` in the 422 `details`. Changes to values appear in the project's
+activity feed as `custom_fields.<field_key>: old -> new`; changes to definitions appear in the admin audit trail
+(`project_field.created`, `.updated`, `.deleted`).
 
 ## Tasks
 

@@ -18,7 +18,7 @@ from .domain import (
     TRANSITIONS,
 )
 from .errors import NotFound, ValidationError
-from .services import activity, collab, csvio, deps, milestones, projects, reports, taskrefs, tasks, users
+from .services import activity, collab, csvio, deps, milestones, project_fields, projects, reports, taskrefs, tasks, users
 from .util import truthy
 
 
@@ -66,6 +66,8 @@ def meta(ctx, req):
         "roles": list(ROLES),
         "transitions": {k: list(v) for k, v in TRANSITIONS.items()},
         "max_task_depth": MAX_TASK_DEPTH,
+        "project_field_types": list(project_fields.FIELD_TYPES),
+        "project_field_limits": project_fields.LIMITS,
     }
 
 
@@ -205,6 +207,30 @@ def import_csv(ctx, req, key):
 @route("POST", "/api/projects/{key}/tasks", role="member")
 def create_task(ctx, req, key):
     return 201, tasks.create_task(ctx, key, req.json())
+
+
+# ------------------------------------------------------------------- project fields
+
+
+@route("GET", "/api/project-fields")
+def list_project_fields(ctx, req):
+    return {"items": project_fields.list_fields(ctx)}
+
+
+@route("POST", "/api/project-fields", role="admin")
+def create_project_field(ctx, req):
+    return 201, project_fields.create_field(ctx, req.json())
+
+
+@route("PATCH", "/api/project-fields/{field_key}", role="admin")
+def update_project_field(ctx, req, field_key):
+    return project_fields.update_field(ctx, field_key, req.json())
+
+
+@route("DELETE", "/api/project-fields/{field_key}", role="admin")
+def delete_project_field(ctx, req, field_key):
+    project_fields.delete_field(ctx, field_key, req.query.get("confirm"))
+    return 204, None
 
 
 # ---------------------------------------------------------------------------- tasks
