@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 
-from ..domain import CLOSED_STATUSES, OPEN_SQL, PRIORITIES, STATUSES, TASK_TYPES
+from ..domain import CLOSED_STATUSES, OPEN_SQL, PRIORITIES, STATUSES, TASK_TYPES, UNMET_DEPENDENCY_SQL
 from ..errors import Forbidden, ValidationError
 from ..util import parse_date
 from . import collab, milestones, project_fields, projects, users
@@ -20,9 +20,9 @@ LEAF_SQL = (
     "t.created_at, t.completed_at, "
     "(SELECT COALESCE(SUM(te.hours), 0) FROM time_entries te WHERE te.task_id = t.id) AS logged, "
     "(SELECT COUNT(*) FROM task_dependencies d JOIN tasks b ON b.id = d.blocker_id "
-    "WHERE d.blocked_id = t.id AND b.status IN " + OPEN_SQL + ") AS blocked_by_open, "
+    "WHERE d.blocked_id = t.id AND " + UNMET_DEPENDENCY_SQL + ") AS blocked_by_open, "
     "(SELECT COUNT(*) FROM task_dependencies d JOIN tasks b ON b.id = d.blocker_id "
-    "WHERE d.blocked_id = t.id AND b.status IN " + OPEN_SQL + " AND b.due_date IS NOT NULL AND b.due_date < ?) "
+    "WHERE d.blocked_id = t.id AND " + UNMET_DEPENDENCY_SQL + " AND b.due_date IS NOT NULL AND b.due_date < ?) "
     "AS blocked_by_overdue "
     "FROM tasks t WHERE t.project_id = ? AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id)"
 )  # parameters: (today, project_id)
@@ -372,7 +372,8 @@ def critical_path(ctx, key):
     edges = [
         (r[0], r[1])
         for r in conn.execute(
-            "SELECT d.blocker_id, d.blocked_id FROM task_dependencies d JOIN tasks t ON t.id = d.blocker_id WHERE t.project_id = ?",
+            "SELECT d.blocker_id, d.blocked_id FROM task_dependencies d JOIN tasks t ON t.id = d.blocker_id "
+            "WHERE t.project_id = ? AND d.type = 'finish_to_start'",
             (project["id"],),
         )
         if r[0] in task and r[1] in task
@@ -380,7 +381,8 @@ def critical_path(ctx, key):
     assumptions = {
         "default_task_hours": default,
         "unit": "effort-hours (not calendar time)",
-        "notes": "Only open tasks linked by dependencies are analysed. Unestimated tasks use the default duration; "
+        "notes": "Only open tasks linked by finish-to-start dependencies are analysed (start-to-start and finish-to-finish links "
+        "and lag/lead days are not part of the effort-hour calculation). Unestimated tasks use the default duration; "
         "a parent's duration is the sum of its open subtasks.",
     }
     if not edges:

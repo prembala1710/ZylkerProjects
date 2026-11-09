@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..errors import NotFound
+from ..errors import NotFound, ValidationError
 from ..util import parse_task_key
 
 BASE = (
@@ -41,3 +41,17 @@ def keys_for_ids(conn, ids):
         ids,
     )
     return {r["id"]: "%s-%d" % (r["key"], r["number"]) for r in rows}
+
+
+def lookup(conn, key, field):
+    """Resolve a task key given in a request body; problems are reported against ``field`` (422), not as a 404."""
+    if not isinstance(key, str):
+        raise ValidationError({field: "must be a task key such as WEB-12"})
+    try:
+        parse_task_key(key)
+    except Exception:
+        raise ValidationError({field: "invalid task key %r" % key}) from None
+    try:
+        return get_row(conn, key)
+    except NotFound:
+        raise ValidationError({field: "task %s does not exist" % key.upper()}) from None

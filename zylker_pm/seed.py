@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime, time, timedelta, timezone
 
 from . import notify
-from .services import collab, deps, milestones, project_fields, projects, tasks, users
+from .services import checklist, collab, deps, links, milestones, project_fields, projects, tasks, users, watchers
 
 DEMO_FIELDS = [
     {"key": "client", "label": "Client", "type": "text", "max_length": 80, "description": "Who the work is for"},
@@ -179,6 +179,17 @@ def _seed(app, today):
         create(ctx, "INT", "Design message cards", assignee="alice", estimate_hours=5, due_date=d(21))
         create(ctx, "INT", "Draft rollout plan", priority="low")
     block("alice", -2, "INT-2", "INT-1")
+
+    # ------------------------------------- checklists, watchers and related tasks (none of these affect health)
+    with act("bob", -1) as ctx:
+        for text, done in (("Hero section", True), ("Card grid", True), ("Mobile spacing pass", False), ("Review with design", False)):
+            checklist.add_item(ctx, "WEB-5", {"text": text, "done": done})
+    with act("alice", 0) as ctx:
+        watchers.add_watcher(ctx, "WEB-8", {})
+        watchers.add_watcher(ctx, "APP-1", {})
+        links.add_link(ctx, "WEB-8", {"type": "relates_to", "task": "APP-1"})
+    with act("carol", 0) as ctx:
+        watchers.add_watcher(ctx, "WEB-8", {})
 
     at(0)
     return tokens

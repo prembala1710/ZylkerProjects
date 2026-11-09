@@ -556,3 +556,228 @@ class CustomFieldTests(UiCase):
             self.settle(page)
             overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
             self.assertLessEqual(overflow, 1, "horizontal page overflow on %s" % r)
+
+
+class TaskExtrasTests(UiCase):
+    """Checklists, watchers, dependency types, related tasks and bulk actions, driven through the real UI.
+
+    Each test works in its own throw-away project so it cannot disturb the demo data the other tests count on.
+    """
+
+    def project(self, titles=("Alpha", "Beta", "Gamma")):
+        status, _ = api(TOKENS["alice"], "POST", "/projects", {"key": "UIX", "name": "UI extras", "members": ["bob", "carol"]})
+        self.assertEqual(status, 201)
+        self.addCleanup(lambda: api(TOKENS["prem"], "DELETE", "/projects/UIX?confirm=UIX"))
+        for title in titles:
+            self.assertEqual(api(TOKENS["alice"], "POST", "/projects/UIX/tasks", {"title": title})[0], 201)
+
+    def section(self, page, heading):
+        return page.locator(".modal .section", has=page.locator("h3", has_text=heading))
+
+    # ------------------------------------------------------------------ checklist
+
+    def test_checklist_add_tick_reorder_edit_and_delete(self):
+        self.project()
+        page = self.open("bob", "#/t/UIX-1")
+        box = self.section(page, "Checklist")
+        for text in ("Write notes", "Tag release", "Announce"):
+            box.get_by_label("New checklist item").fill(text)
+            box.get_by_label("New checklist item").press("Enter")  # Enter adds, and the field is ready for the next one
+            expect(box.locator(".check-item", has_text=text)).to_be_visible()
+        expect(box.locator("h3")).to_have_text("Checklist (0/3)")
+        box.get_by_role("checkbox", name="Write notes").check()
+        expect(box.locator("h3")).to_have_text("Checklist (1/3)")
+        expect(box.locator(".check-item.done")).to_have_count(1)
+        box.get_by_role("button", name="Move Announce up").click()
+        expect(box.locator(".check-text").nth(1)).to_have_text("Announce")
+        box.get_by_role("button", name="Edit Tag release").click()
+        page.locator(".modal[aria-label='Edit checklist item']").get_by_label("Checklist item text").fill("Tag the release")
+        page.get_by_role("button", name="Save", exact=True).click()
+        expect(box.locator(".check-item", has_text="Tag the release")).to_be_visible()
+        box.get_by_role("button", name="Delete Announce").click()
+        expect(box.locator(".check-item")).to_have_count(2)
+        items = api(TOKENS["bob"], "GET", "/tasks/UIX-1/checklist")[1]["items"]
+        self.assertEqual([(i["text"], i["done"], i["position"]) for i in items], [("Write notes", True, 1), ("Tag the release", False, 2)])
+        self.assertEqual(items[0]["done_by"]["username"], "bob")
+        page.keyboard.press("Escape")
+        page.evaluate("location.hash = '#/p/UIX/list'")
+        self.settle(page)
+        expect(page.locator("tr", has_text="UIX-1").locator(".chip", has_text="1/2")).to_be_visible()
+        self.assert_clean_text(page, "list with checklist chip")
+
+    def test_a_viewer_reads_the_checklist_but_cannot_change_it(self):
+        self.project()
+        api(TOKENS["alice"], "POST", "/tasks/UIX-1/checklist", {"text": "Look but do not touch"})
+        page = self.open("erin", "#/t/UIX-1")
+        box = self.section(page, "Checklist")
+        expect(box.get_by_role("checkbox", name="Look but do not touch")).to_be_disabled()
+        expect(box.get_by_label("New checklist item")).to_have_count(0)
+
+    def test_hostile_checklist_text_is_shown_as_text(self):
+        self.project()
+        evil = "<img src=x onerror=window.__pwned=1>"
+        self.assertEqual(api(TOKENS["alice"], "POST", "/tasks/UIX-1/checklist", {"text": evil})[0], 201)
+        page = self.open("alice", "#/t/UIX-1")
+        expect(self.section(page, "Checklist").locator(".check-text")).to_have_text(evil)
+        self.assertEqual(page.locator(".modal img").count(), 0)
+        self.assertEqual(page.evaluate("typeof window.__pwned"), "undefined")
+
+    # ------------------------------------------------------------------- watchers
+
+    def test_watch_and_stop_watching_and_adding_a_colleague(self):
+        self.project()
+        page = self.open("bob", "#/t/UIX-1")
+        watch = page.locator(".modal .watch-box")
+        expect(watch).to_contain_text("Nobody is following this task.")
+        watch.get_by_role("button", name="Watch", exact=True).click()
+        expect(watch).to_contain_text("Watchers (1)")
+        expect(watch.get_by_role("button", name="Stop watching")).to_be_visible()
+        watch.get_by_label("Add a watcher").select_option("carol")
+        watch.get_by_role("button", name="Add", exact=True).click()
+        expect(watch).to_contain_text("Watchers (2)")
+        self.assertEqual(sorted(w["username"] for w in api(TOKENS["bob"], "GET", "/tasks/UIX-1/watchers")[1]["items"]), ["bob", "carol"])
+        watch.get_by_role("button", name="Stop watching").click()
+        expect(watch).to_contain_text("Watchers (1)")
+        expect(watch.get_by_role("button", name="Watch", exact=True)).to_be_visible()
+        self.assertEqual([w["username"] for w in api(TOKENS["bob"], "GET", "/tasks/UIX-1/watchers")[1]["items"]], ["carol"])
+
+    def test_a_viewer_can_follow_a_task_but_not_sign_anyone_else_up(self):
+        self.project()
+        page = self.open("erin", "#/t/UIX-1")
+        watch = page.locator(".modal .watch-box")
+        expect(watch.get_by_label("Add a watcher")).to_have_count(0)
+        watch.get_by_role("button", name="Watch", exact=True).click()
+        expect(watch).to_contain_text("Watchers (1)")
+        self.assertEqual(api(TOKENS["erin"], "GET", "/tasks/UIX-1")[1]["watching"], True)
+
+    # --------------------------------------------------------- dependency types
+
+    def test_dependency_type_lag_editing_and_date_conflicts(self):
+        self.project()
+        api(TOKENS["alice"], "PATCH", "/tasks/UIX-1", {"due_date": "2030-01-10"})
+        api(TOKENS["alice"], "PATCH", "/tasks/UIX-2", {"due_date": "2030-01-01"})
+        page = self.open("alice", "#/t/UIX-2")
+        dep = self.section(page, "Dependencies")
+        dep.get_by_label("Related task key").fill("UIX-1")
+        dep.get_by_label("Dependency type").select_option(label="Start \u2192 Start")
+        dep.get_by_label("Lag in days (negative for lead)").fill("2")
+        dep.get_by_role("button", name="Link", exact=True).click()
+        row = dep.locator(".item", has_text="UIX-1")
+        expect(row.locator(".chip")).to_have_text("SS \u00b7 2d lag")
+        self.assertEqual(api(TOKENS["alice"], "GET", "/tasks/UIX-2")[1]["blocked_by"][0]["type"], "start_to_start")
+        row.get_by_role("button", name="Edit dependency on UIX-1").click()
+        edit = page.locator(".modal[aria-label='Dependency on UIX-1']")
+        edit.get_by_label("Type").select_option("finish_to_finish")
+        edit.get_by_label("Lag in days").fill("-1")
+        edit.get_by_role("button", name="Save").click()
+        expect(row.locator(".chip")).to_have_text("FF \u00b7 1d lead")
+        expect(row.locator(".badge", has_text="dates")).to_be_visible()  # UIX-2 is due before UIX-1's due date minus a day
+        api(TOKENS["alice"], "PATCH", "/tasks/UIX-2", {"due_date": "2030-01-09"})
+        page.keyboard.press("Escape")
+        page.evaluate("location.hash = '#/t/UIX-2'")
+        row = self.section(page, "Dependencies").locator(".item", has_text="UIX-1")
+        expect(row.locator(".chip")).to_be_visible()
+        expect(row.locator(".badge", has_text="dates")).to_have_count(0)
+
+    def test_the_server_explains_a_refused_start_to_start_move(self):
+        self.project()
+        api(TOKENS["alice"], "POST", "/tasks/UIX-2/dependencies", {"blocked_by": "UIX-1", "type": "start_to_start"})
+        page = self.open("alice", "#/t/UIX-2")
+        page.locator(".modal").get_by_label("Status").select_option("in_progress")
+        expect(page.locator(".toast.error")).to_contain_text("must start first")
+        self.assertEqual(api(TOKENS["alice"], "GET", "/tasks/UIX-2")[1]["status"], "todo")
+
+    # -------------------------------------------------------------- related tasks
+
+    def test_related_tasks_read_correctly_from_both_ends(self):
+        self.project()
+        page = self.open("alice", "#/t/UIX-1")
+        rel = self.section(page, "Related tasks")
+        rel.get_by_label("Link type").select_option("duplicates")
+        rel.get_by_label("Task to link").fill("uix-3")
+        rel.get_by_role("button", name="Add relation").click()
+        expect(rel.locator(".item", has_text="UIX-3")).to_contain_text("duplicates")
+        page.keyboard.press("Escape")
+        page.evaluate("location.hash = '#/t/UIX-3'")
+        other = self.section(page, "Related tasks")
+        expect(other.locator(".item", has_text="UIX-1")).to_contain_text("is duplicated by")
+        other.get_by_role("button", name="Remove relation to UIX-1").click()
+        expect(other).to_contain_text("never block work")
+        self.assertEqual(api(TOKENS["alice"], "GET", "/tasks/UIX-1")[1]["links"], [])
+
+    # ---------------------------------------------------------------- bulk actions
+
+    def test_bulk_change_priority_and_labels_for_selected_tasks(self):
+        self.project()
+        page = self.open("alice", "#/p/UIX/list")
+        self.settle(page)
+        bar = page.locator(".bulk-bar")
+        expect(bar).to_be_hidden()
+        page.locator("tr", has_text="UIX-1").locator("input.row-check").check()
+        page.locator("tr", has_text="UIX-2").locator("input.row-check").check()
+        expect(bar).to_contain_text("2 selected")
+        bar.get_by_label("Field to change").select_option("priority")
+        bar.get_by_label("New priority").select_option("high")
+        bar.get_by_role("button", name="Apply").click()
+        expect(page.locator(".toast.ok")).to_contain_text("2 tasks updated")
+        expect(bar).to_be_hidden()  # the selection is spent
+        priorities = {k: api(TOKENS["alice"], "GET", "/tasks/" + k)[1]["priority"] for k in ("UIX-1", "UIX-2", "UIX-3")}
+        self.assertEqual(priorities, {"UIX-1": "high", "UIX-2": "high", "UIX-3": "medium"})
+        page.locator("th input.select-all").check()  # everything on the page
+        expect(bar).to_contain_text("3 selected")
+        bar.get_by_label("Field to change").select_option("add_labels")
+        bar.get_by_label("Labels to add").fill("q4, ui")
+        bar.get_by_role("button", name="Apply").click()
+        expect(page.locator("tr", has_text="UIX-3").locator(".chip", has_text="ui")).to_be_visible()
+        self.assertEqual(api(TOKENS["alice"], "GET", "/tasks/UIX-3")[1]["labels"], ["q4", "ui"])
+        self.assert_clean_text(page, "list after bulk change")
+
+    def test_bulk_change_reports_the_tasks_the_server_refused(self):
+        self.project()
+        api(TOKENS["alice"], "POST", "/tasks/UIX-2/dependencies", {"blocked_by": "UIX-1"})
+        page = self.open("alice", "#/p/UIX/list")
+        self.settle(page)
+        page.locator("th input.select-all").check()
+        bar = page.locator(".bulk-bar")
+        bar.get_by_label("Field to change").select_option("status")
+        bar.get_by_label("New status").select_option("in_progress")
+        bar.get_by_role("button", name="Apply").click()
+        report = page.locator(".modal[aria-label*='could not be changed']")
+        expect(report).to_contain_text("UIX-2")
+        expect(report).to_contain_text("blocked by unfinished task(s): UIX-1")
+        expect(report).to_contain_text("The other tasks were saved.")
+        statuses = {k: api(TOKENS["alice"], "GET", "/tasks/" + k)[1]["status"] for k in ("UIX-1", "UIX-2", "UIX-3")}
+        self.assertEqual(statuses, {"UIX-1": "in_progress", "UIX-2": "todo", "UIX-3": "in_progress"})  # UIX-2 still waits for UIX-1, which is only in progress
+        report.get_by_role("button", name="OK").click()
+        expect(page.locator(".modal")).to_have_count(0)
+
+    def test_bulk_clear_selection_and_filters_reset_it(self):
+        self.project()
+        page = self.open("alice", "#/p/UIX/list")
+        self.settle(page)
+        page.locator("tr", has_text="UIX-1").locator("input.row-check").check()
+        expect(page.locator(".bulk-bar")).to_contain_text("1 selected")
+        page.get_by_role("button", name="Clear selection").click()
+        expect(page.locator(".bulk-bar")).to_be_hidden()
+        expect(page.locator("input.row-check:checked")).to_have_count(0)
+        page.locator("tr", has_text="UIX-1").locator("input.row-check").check()
+        page.get_by_label("Priority", exact=True).select_option("high")  # a filter change drops the selection
+        self.settle(page)
+        expect(page.locator(".bulk-bar")).to_be_hidden()
+
+    def test_viewers_see_no_bulk_controls_and_phones_do_not_overflow(self):
+        self.project()
+        page = self.open("erin", "#/p/UIX/list")
+        self.settle(page)
+        expect(page.locator("input.row-check")).to_have_count(0)
+        expect(page.locator(".bulk-bar")).to_have_count(0)
+        phone = self.open("alice", "#/p/UIX/list", viewport={"width": 390, "height": 800})
+        self.settle(phone)
+        phone.locator("th input.select-all").check()
+        for hash_ in ("#/p/UIX/list", "#/t/UIX-1"):
+            phone.evaluate("h => location.hash = h", hash_)
+            self.settle(phone)
+            if hash_.startswith("#/p"):
+                phone.locator("th input.select-all").check()
+            overflow = phone.evaluate("document.documentElement.scrollWidth - window.innerWidth")
+            self.assertLessEqual(overflow, 1, "horizontal page overflow on %s" % hash_)
