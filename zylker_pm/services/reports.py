@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from ..domain import CLOSED_STATUSES, OPEN_SQL, PRIORITIES, STATUSES, TASK_TYPES
 from ..errors import Forbidden, ValidationError
 from ..util import parse_date
-from . import collab, milestones, projects, users
+from . import collab, milestones, project_fields, projects, users
 
 LEAF_SQL = (
     "SELECT t.id, t.number, t.title, t.status, t.priority, t.due_date, t.assignee_id, t.estimate_hours, "
@@ -174,11 +174,12 @@ def portfolio(ctx):
     items, health_counts = [], defaultdict(int)
     open_tasks = overdue = 0
     rows = ctx.conn.execute(projects.PROJECT_SELECT + "WHERE p.status <> 'archived' ORDER BY p.key").fetchall()
+    custom = project_fields.values_map(ctx.conn, [r["id"] for r in rows])
     for row in rows:
         m = project_metrics(ctx, row)
         h = health(row, m, ctx.today)
         due = parse_date(row["due_date"])
-        base = projects.to_dict(ctx, row)
+        base = projects.to_dict(ctx, row, custom=custom[row["id"]])
         items.append(
             {
                 **base,
