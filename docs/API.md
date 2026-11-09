@@ -1,6 +1,6 @@
 # API reference
 
-Base path `/api`. JSON in, JSON out (`Content-Type: application/json`), except CSV import/export.
+Base path `/api`. JSON in, JSON out (`Content-Type: application/json`), except CSV import/export and attachment upload/download.
 Every endpoint except `GET /api/health` needs `Authorization: Bearer <token>`.
 
 *Role* is the minimum global role (`viewer` < `member` < `manager` < `admin`). Task-level writes by a `member`
@@ -105,6 +105,50 @@ estimate_hours assignee`, comma-separated, `-` prefix for descending; dates sort
 |---|---|---|
 | `PATCH /api/milestones/{milestone_id}` | manager | `{name?, due_date?, description?}` |
 | `DELETE /api/milestones/{milestone_id}` | manager | Linked tasks keep existing and lose the link |
+
+## Attachments
+
+Files are attached to tasks. Unlike the rest of the API, the request body is **the file itself** (no multipart form, no base64) and the
+name travels in the query string. `Expect:` stops curl waiting for a `100 Continue` the server does not send.
+
+```bash
+curl -X POST "http://127.0.0.1:8080/api/tasks/WEB-5/attachments?filename=login-error.png" \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: image/png" -H "Expect:" --data-binary @login-error.png
+
+curl -H "Authorization: Bearer $TOKEN" -o login-error.png http://127.0.0.1:8080/api/attachments/7/content
+```
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/tasks/{key}/attachments` | viewer | `{items, total_bytes, limits: {max_file_bytes, max_per_task}}`, oldest first |
+| `POST /api/tasks/{key}/attachments` | member | Body: the file's bytes. `?filename=` is required. 201 with the attachment. Needs write access to the project |
+| `GET /api/attachments/{attachment_id}/content` | viewer | The bytes, always with `Content-Disposition: attachment` |
+| `DELETE /api/attachments/{attachment_id}` | member | The person who attached the file, or a manager. Write access to the project is needed |
+| `GET /api/projects/{key}/attachments` | viewer | Every file of the project, newest first, each with `task` and `task_title`. `?q=` (file name contains, case-insensitive) `?limit=` (default 25, max 100) `?offset=`. Also `total` and `total_bytes` (of the matches) |
+
+### Attachment fields
+
+`id` · `task` (key) · `filename` · `content_type` · `size` (bytes) · `sha256` (hex, of the content) · `preview` · `uploaded_by` (`id`, `username`,
+`display_name`) · `created_at`. `preview` is `image/png`, `image/jpeg`, `image/gif` or `image/webp` when the first bytes of the file really are
+that kind of image, and `null` for everything else: it is what the UI may display, whatever the file claims to be.
+
+### Rules
+
+- **File name.** Reduced to a plain name: directories (`/` and `\`), control characters and invisible direction overrides are removed,
+  blanks collapse, trailing dots and blanks go, Unicode is normalised (NFC), and it is shortened to 180 characters keeping the extension.
+  Nothing usable left means `file`. The response shows the name that was stored.
+- **Type.** `Content-Type` of the upload is stored as the file's type when it is a well-formed `type/subtype` (parameters dropped); when it is
+  missing, malformed or `application/octet-stream`, the type is guessed from the extension, else `application/octet-stream`. It is a label
+  for API clients and is returned as the `Content-Type` of the download; it never decides how the UI shows a file.
+- **Limits.** `ZYLKER_ATTACHMENT_MAX_MB` per file (413 `payload_too_large`; the body is not read, so some clients see a reset connection
+  instead of the answer), 25 files per task (409 `too_many_attachments`), `ZYLKER_ATTACHMENT_QUOTA_MB` in total (409
+  `storage_quota_exceeded`). A missing `filename` or an empty body is a 422. A connection that ends before the whole body has arrived is a
+  400 `incomplete_body`, and nothing is stored. The size must be known up front: a chunked upload (`Transfer-Encoding: chunked`, e.g. `curl -T -`)
+  is a 400 `length_required`.
+- **Downloads** carry `Content-Disposition: attachment` with an ASCII `filename` and a UTF-8 `filename*`, `X-Content-Type-Options: nosniff`
+  and `Cache-Control: no-store`, like every other API response. Authentication is the bearer header, so a download cannot be started from a
+  plain link.
+- **Deleting** a task or project deletes its attachments. Uploads and deletions (`attachment.added`, `attachment.deleted`) are audited, without the content.
 
 ## Reports
 

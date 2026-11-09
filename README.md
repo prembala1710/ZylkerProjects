@@ -21,6 +21,8 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **Burndown, critical path, timesheets, digests** - computed live from the data.
 - **Roles and an audit trail** - viewer / member / manager / admin, per-project membership, and a field-level history of every change.
 - **Zoho Cliq notifications** (optional) - assignments, completions, blockers, @mentions and a scheduled overdue digest.
+- **File attachments** - attach screenshots, specs and logs to a task (pick, drop or paste), preview images, and find every file of a
+  project on its Files tab; files live inside the database, so a backup captures them (see [File attachments](#file-attachments)).
 - **CSV import / export** - bring in a Jira-style export (with a dry run) or take your data out.
 
 ## Quick start
@@ -59,6 +61,8 @@ All settings are environment variables; nothing is read from the repository.
 | `ZYLKER_DB` | `zylker.db` | SQLite file |
 | `ZYLKER_HOST` | `127.0.0.1` | Listen address. Anything other than loopback prints a warning: put a TLS-terminating reverse proxy in front |
 | `ZYLKER_PORT` | `8080` | Listen port |
+| `ZYLKER_ATTACHMENT_MAX_MB` | `10` | Largest single attachment in megabytes (fractions allowed, at most 100). An upload is held in memory while it is stored |
+| `ZYLKER_ATTACHMENT_QUOTA_MB` | `2048` | Total size of all attachments. Further uploads are refused until files are deleted. `0` means unlimited |
 | `ZYLKER_TIMEZONE` | `UTC` | IANA name, e.g. `Asia/Kolkata`. Decides what "today" is for overdue checks, digests and burndown days. Timestamps are always stored in UTC |
 | `ZYLKER_PUBLIC_URL` | *(empty)* | Public base URL (`https://pm.example.com`); makes task keys in Cliq messages clickable |
 | `ZYLKER_CLIQ_ENDPOINT` | *(empty = notifications off)* | A Cliq **incoming webhook URL**. It contains a key - treat it as a secret. Must be `https` (plain `http` only for localhost) |
@@ -165,6 +169,28 @@ Valid rows are imported and bad rows are reported by row number - one bad row ne
 Unknown assignees are left unassigned with a warning. Subtask/parent links and milestones are not imported.
 `examples/jira_style_import.csv` is a small fictional file in this layout.
 
+## File attachments
+
+Attach screenshots, specs and logs to the task they belong to: **task dialog -> Attachments -> Attach files**, or drop files anywhere in the
+window while the task is open, or paste a screenshot (Ctrl+V / Cmd+V). Images get a **Preview** button, every file a **Download** button, and a
+project's **Files** tab lists all of its files with the task each belongs to, searchable by name.
+
+- **Who:** anyone signed in can read and download. Members of the project (and managers and admins) can attach. The person who attached a
+  file, or a manager, can delete it. Archived projects are read-only.
+- **Limits:** 10 MB per file (`ZYLKER_ATTACHMENT_MAX_MB`, up to 100), 25 files per task, 2,048 MB for everything
+  (`ZYLKER_ATTACHMENT_QUOTA_MB`, `0` = unlimited). Empty files are refused. The UI checks the size before sending; the server enforces it.
+- **Where files live:** inside the database (two extra tables, created automatically the first time the new version starts - no migration
+  step). `zylker-pm backup` therefore includes them, and deleting a task or project deletes its files in the same transaction.
+- **Audited:** `attachment.added` and `attachment.deleted` appear in the task's history and the project's activity feed (name and size, never content).
+- **From scripts:** the request body is the file itself, not a multipart form (see the [API reference](docs/API.md#attachments)):
+
+  ```bash
+  curl -X POST "http://127.0.0.1:8080/api/tasks/WEB-5/attachments?filename=login-error.png" \
+       -H "Authorization: Bearer $TOKEN" -H "Content-Type: image/png" -H "Expect:" --data-binary @login-error.png
+  ```
+
+Not included: virus scanning, file versions, thumbnails in lists, renaming (delete and attach again) and images embedded in comments.
+
 ## Operations
 
 - **Backups:** `zylker-pm backup /backups/zylker-$(date +%F).db` uses SQLite's online backup, so it is safe while the server runs.
@@ -173,6 +199,10 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
   speaks plain HTTP, sends no HSTS header, and has no CORS (same-origin only). It is also a standard WSGI callable
   (`zylker_pm.app.App`) if you prefer gunicorn or waitress.
 - **Scale:** SQLite in WAL mode with one writer at a time suits a team or department on a single host. It has **not** been load-tested.
+- **Attachments and size:** files are stored in the database, so the file grows with them and so does every backup. An upload is held in memory
+  while it is stored (allow about the per-file limit per concurrent upload). Deleting files frees space inside the database but does not shrink
+  the file: run `sqlite3 zylker.db VACUUM` while the server is stopped to reclaim it. `zylker-pm serve` disconnects a client that has been silent
+  for 60 seconds, so a stalled upload cannot hold a thread for ever.
 - **Upgrades:** the schema version is stored in the database; a database newer than the code is refused rather than modified.
 
 ## Security notes
@@ -186,8 +216,13 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
   no inline scripts or styles, no external resources, no framing - so stored text cannot become markup. A browser test submits
   `<script>`/`<img onerror>` payloads in titles, descriptions, comments and project names and checks that none executes.
 - Static files are served from a fixed whitelist of three paths; there is no filesystem lookup from the URL.
+- **Attachments are inert.** A stored file is only ever served as a download (`Content-Disposition: attachment`, `nosniff`, the usual
+  Content-Security-Policy); the UI saves it as an opaque octet stream and never opens it. The one thing that is displayed is a PNG, JPEG, GIF or
+  WebP whose first bytes really are that image (the claimed type is ignored), shown through a `data:` URL in an `<img>`; SVG is never previewed.
+  File names are reduced to a plain name (no directories, control or direction-override characters) and shown as text. An upload body is read
+  after authentication but before the database's write lock is taken, and half an upload is never stored.
 - **Not covered:** single sign-on (Zoho or otherwise), token expiry, failed-login throttling (tokens are unguessable, but throttle at
-  the proxy anyway), e-mail notifications, per-project read restrictions (every signed-in user can read every project), file attachments.
+  the proxy anyway), e-mail notifications, per-project read restrictions (every signed-in user can read every project and its attachments), malware scanning of attachments.
 
 ## Development
 
@@ -212,8 +247,8 @@ tests/                 unit, HTTP, CLI and browser tests
 
 ## Limitations and ideas for later
 
-Dependencies are finish-to-start and within one project; there are no custom fields, recurring tasks, task templates or
-attachments; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
-permissions would be the natural next steps for a larger organisation.
+Dependencies are finish-to-start and within one project; there are no custom fields, recurring tasks or task templates; the
+burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read permissions would be
+the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
