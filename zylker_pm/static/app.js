@@ -34,6 +34,7 @@ const h = (tag, attrs, ...kids) => make((t) => document.createElement(t), tag, a
 const put = (el, ...kids) => { addChildren(el, kids); return el; };
 const sv = (tag, attrs, ...kids) => make((t) => document.createElementNS(SVG_NS, t), tag, attrs, kids);
 const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const clear = (el) => el.replaceChildren();
 
 /* ============================== constants & formatting ============================== */
@@ -44,6 +45,15 @@ const HEALTH_LABEL = { on_track: 'On track', at_risk: 'At risk', off_track: 'Off
 const PROJECT_STATUS_LABEL = { planning: 'Planning', active: 'Active', on_hold: 'On hold', completed: 'Completed', archived: 'Archived' };
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const ROLES = ['viewer', 'member', 'manager', 'admin'];
+const DEP_TYPE_LABEL = { finish_to_start: 'Finish \u2192 Start', start_to_start: 'Start \u2192 Start', finish_to_finish: 'Finish \u2192 Finish' };
+const DEP_TYPE_SHORT = { finish_to_start: 'FS', start_to_start: 'SS', finish_to_finish: 'FF' };
+const DEP_TYPE_HELP = {
+  finish_to_start: 'The blocked task cannot start until the blocker is finished.',
+  start_to_start: 'The blocked task cannot start until the blocker has started.',
+  finish_to_finish: 'The blocked task cannot finish until the blocker is finished.',
+};
+const LINK_LABEL = { relates_to: 'relates to', duplicates: 'duplicates', duplicated_by: 'is duplicated by', cloned_from: 'is cloned from', cloned_to: 'was cloned to' };
+const lagText = (n) => (!n ? '' : n > 0 ? `${n}d lag` : `${-n}d lead`);
 
 const state = { token: null, me: null, meta: null, users: [], projects: [], fields: [], today: '', pendingTask: null, projectCache: {} };
 
@@ -475,6 +485,7 @@ async function teamView(view, alive) {
 /* ============================== task table (shared) ============================== */
 function taskTable(tasks, opts = {}) {
   const heads = [opts.showProject ? 'Task' : 'Key', 'Title', 'Status', 'Priority', 'Assignee', 'Due', 'Est / logged'];
+  const sel = opts.selection; // { selected: Set of task keys, onChange() } turns on the bulk-action checkboxes
   const th = (label) => {
     const sortable = opts.sort && opts.sortable && opts.sortable[label];
     if (!sortable) return h('th', { text: label });
@@ -483,16 +494,40 @@ function taskTable(tasks, opts = {}) {
       onclick: () => opts.onSort(sortable), onkeydown: (e) => { if (e.key === 'Enter') opts.onSort(sortable); } }, label, active ? (opts.sort.startsWith('-') ? ' \u25BE' : ' \u25B4') : '');
   };
   if (!tasks.length) return h('div', { class: 'empty', text: 'No tasks match.' });
-  return h('table', { class: 'table' }, h('thead', {}, h('tr', {}, heads.map(th))), h('tbody', {}, tasks.map((t) => h('tr', { class: 'click', tabindex: 0,
-    onclick: () => openTask(t.key), onkeydown: (e) => { if (e.key === 'Enter') openTask(t.key); } },
+  let table;
+  let selectAll = null;
+  const syncSelectAll = () => {
+    if (!selectAll) return;
+    const chosen = tasks.filter((t) => sel.selected.has(t.key)).length;
+    selectAll.checked = chosen === tasks.length;
+    selectAll.indeterminate = chosen > 0 && chosen < tasks.length;
+  };
+  if (sel) {
+    selectAll = h('input', { type: 'checkbox', class: 'select-all', 'aria-label': 'Select all tasks on this page', onchange: (e) => {
+      for (const t of tasks) { if (e.target.checked) sel.selected.add(t.key); else sel.selected.delete(t.key); }
+      for (const box of table.querySelectorAll('input.row-check')) box.checked = e.target.checked;
+      sel.onChange();
+    } });
+  }
+  const pick = (t) => h('td', { class: 'pick', onclick: (e) => e.stopPropagation() },
+    h('input', { type: 'checkbox', class: 'row-check', 'aria-label': 'Select ' + t.key, checked: sel.selected.has(t.key), onchange: (e) => {
+      if (e.target.checked) sel.selected.add(t.key); else sel.selected.delete(t.key);
+      syncSelectAll(); sel.onChange();
+    } }));
+  table = h('table', { class: 'table' }, h('thead', {}, h('tr', {}, sel ? h('th', { class: 'pick' }, selectAll) : null, heads.map(th))), h('tbody', {}, tasks.map((t) => h('tr', { class: 'click', tabindex: 0,
+    onclick: () => openTask(t.key), onkeydown: (e) => { if (e.key === 'Enter' && e.target === e.currentTarget) openTask(t.key); } },
+    sel ? pick(t) : null,
     h('td', { class: 'nowrap' }, h('strong', { text: t.key })),
     h('td', {}, t.title, t.parent ? h('span', { class: 'chip', style: { marginLeft: '6px' }, text: 'sub of ' + t.parent }) : null,
       t.blocked_by_open ? h('span', { class: 'chip', style: { marginLeft: '6px' }, title: 'Waiting on open tasks', text: '\u{1F512} ' + t.blocked_by_open }) : null,
+      t.checklist.total ? h('span', { class: 'chip', style: { marginLeft: '6px' }, title: 'Checklist items done', text: `\u2713 ${t.checklist.done}/${t.checklist.total}` }) : null,
       t.labels.map((l) => h('span', { class: 'chip', style: { marginLeft: '6px' }, text: l }))),
     h('td', {}, statusBadge(t.status)), h('td', {}, priorityBadge(t.priority)),
     h('td', {}, h('div', { class: 'row' }, avatar(t.assignee), t.assignee ? h('span', { class: 'small', text: t.assignee.display_name }) : null)),
     h('td', { class: 'nowrap' }, dueText(t) || '\u2014'),
     h('td', { class: 'nowrap small', text: `${fmtHours(t.estimate_hours)} / ${fmtHours(t.logged_hours || null)}` })))));
+  syncSelectAll();
+  return table;
 }
 
 /* ============================== project view ============================== */
@@ -547,6 +582,7 @@ async function boardTab(root, ctx) {
       h('div', { class: 'title', text: t.title }),
       h('div', { class: 'meta' }, avatar(t.assignee), dueText(t),
         t.subtasks.total ? h('span', { title: 'Subtasks done', text: `\u2611 ${t.subtasks.done}/${t.subtasks.total}` }) : null,
+        t.checklist.total ? h('span', { title: 'Checklist items done', text: `\u2713 ${t.checklist.done}/${t.checklist.total}` }) : null,
         t.blocked_by_open ? h('span', { title: 'Waiting on open tasks', text: `\u{1F512} ${t.blocked_by_open}` }) : null,
         t.labels.slice(0, 2).map((l) => h('span', { class: 'chip', text: l }))));
     el.addEventListener('dragstart', (e) => {
@@ -617,31 +653,94 @@ async function listTab(root, ctx) {
   const { project, key } = ctx;
   const f = { status: '', assignee: '', priority: '', q: '', open: false, sort: 'key', offset: 0 };
   const LIMIT = 25;
+  const editable = canWrite(project);
+  const selected = new Set(); // task keys ticked for a bulk action; survives paging and sorting, cleared by any filter change
+  const milestones = editable ? (await api(`/projects/${key}/milestones`)).items : [];
   const results = h('div', { class: 'card flush' });
   const pager = h('div', { class: 'row small muted', style: { marginTop: '10px' } });
+  const bulk = editable ? bulkBar(selected, { project, milestones, onDone: () => load() }) : null;
   async function load() {
     const data = await api('/tasks', { query: { project: key, status: f.status, assignee: f.assignee, priority: f.priority, q: f.q, open: f.open ? 'true' : '', sort: f.sort, limit: LIMIT, offset: f.offset } });
     if (!ctx.alive()) return;
     clear(results);
     results.append(taskTable(data.items, { sort: f.sort, onSort: (field) => { f.sort = f.sort === field ? '-' + field : field; f.offset = 0; load(); },
-      sortable: { Key: 'key', Title: 'title', Status: 'status', Priority: 'priority', Assignee: 'assignee', Due: 'due_date' } }));
+      sortable: { Key: 'key', Title: 'title', Status: 'status', Priority: 'priority', Assignee: 'assignee', Due: 'due_date' },
+      selection: bulk ? { selected, onChange: bulk.update } : null }));
+    if (bulk) bulk.update();
     clear(pager);
     const end = Math.min(f.offset + LIMIT, data.total);
     pager.append(h('span', { text: data.total ? `${f.offset + 1}\u2013${end} of ${data.total}` : '0 tasks' }), h('span', { class: 'spacer' }),
       h('button', { class: 'btn small', disabled: f.offset === 0, onclick: () => { f.offset = Math.max(0, f.offset - LIMIT); load(); } }, '\u2039 Prev'),
       h('button', { class: 'btn small', disabled: end >= data.total, onclick: () => { f.offset += LIMIT; load(); } }, 'Next \u203A'));
   }
-  const set = (name, transform) => (e) => { f[name] = transform ? transform(e) : e.target.value; f.offset = 0; load(); };
+  const refilter = () => { f.offset = 0; selected.clear(); load(); };
+  const set = (name, transform) => (e) => { f[name] = transform ? transform(e) : e.target.value; refilter(); };
   let timer;
   root.append(h('div', { class: 'toolbar' },
-    h('input', { type: 'search', placeholder: 'Search title, description or key\u2026', 'aria-label': 'Search', oninput: (e) => { clearTimeout(timer); const v = e.target.value; timer = setTimeout(() => { f.q = v; f.offset = 0; load(); }, 250); } }),
+    h('input', { type: 'search', placeholder: 'Search title, description or key\u2026', 'aria-label': 'Search', oninput: (e) => { clearTimeout(timer); const v = e.target.value; timer = setTimeout(() => { f.q = v; refilter(); }, 250); } }),
     h('select', { 'aria-label': 'Status', onchange: set('status') }, optionList([['', 'Any status'], ...state.meta.statuses.map((s) => [s, STATUS_LABEL[s]])])),
     h('select', { 'aria-label': 'Priority', onchange: set('priority') }, optionList([['', 'Any priority'], ...state.meta.priorities.map((p) => [p, PRIORITY_LABEL[p]])])),
     h('select', { 'aria-label': 'Assignee', onchange: set('assignee') }, optionList([['', 'Anyone'], ['me', 'Me'], ['none', 'Unassigned'], ...userPairs(project.members)])),
     h('label', { class: 'row small' }, h('input', { type: 'checkbox', onchange: set('open', (e) => e.target.checked) }), 'Open only'),
     h('span', { class: 'spacer' }),
-    h('button', { class: 'btn', onclick: () => downloadCsv(key) }, 'Export CSV')), results, pager);
+    h('button', { class: 'btn', onclick: () => downloadCsv(key) }, 'Export CSV')), bulk ? bulk.el : null, results, pager);
   await load();
+}
+
+/* ---------- bulk actions (List tab) ---------- */
+const BULK_FIELDS = [['status', 'Status'], ['priority', 'Priority'], ['assignee', 'Assignee'], ['milestone', 'Milestone'], ['due_date', 'Due date'], ['add_labels', 'Add label'], ['remove_labels', 'Remove label']];
+function bulkBar(selected, { project, milestones, onDone }) {
+  const count = h('strong', { 'aria-live': 'polite' });
+  const fieldSel = h('select', { 'aria-label': 'Field to change', onchange: () => buildValue() }, optionList(BULK_FIELDS));
+  const valueBox = h('span', { class: 'row' });
+  let value;
+  function buildValue() {
+    clear(valueBox);
+    const kind = fieldSel.value;
+    if (kind === 'status') value = h('select', { 'aria-label': 'New status' }, optionList(state.meta.statuses.map((x) => [x, STATUS_LABEL[x]])));
+    else if (kind === 'priority') value = h('select', { 'aria-label': 'New priority' }, optionList(state.meta.priorities.map((x) => [x, PRIORITY_LABEL[x]])));
+    else if (kind === 'assignee') value = h('select', { 'aria-label': 'New assignee' }, optionList(userPairs(project.members, 'Unassigned')));
+    else if (kind === 'milestone') value = h('select', { 'aria-label': 'New milestone' }, optionList([['', 'No milestone'], ...milestones.map((m) => [String(m.id), m.name])]));
+    else if (kind === 'due_date') value = h('input', { type: 'date', 'aria-label': 'New due date', title: 'Leave empty to clear the due date' });
+    else value = h('input', { type: 'text', placeholder: 'label, label\u2026', 'aria-label': kind === 'add_labels' ? 'Labels to add' : 'Labels to remove', maxlength: 200 });
+    put(valueBox, value, kind === 'due_date' ? h('span', { class: 'small muted', text: 'empty clears it' }) : null);
+  }
+  function changes() {
+    const kind = fieldSel.value, v = value.value.trim();
+    if (kind === 'assignee') return { assignee: v === '' ? null : v };
+    if (kind === 'milestone') return { milestone: v === '' ? null : Number(v) };
+    if (kind === 'due_date') return { due_date: v === '' ? null : v };
+    if (kind === 'add_labels' || kind === 'remove_labels') {
+      const labels = v.split(/[,\s]+/).filter(Boolean);
+      if (!labels.length) throw new Error('Type at least one label');
+      return { [kind]: labels };
+    }
+    return { [kind]: v };
+  }
+  const apply = h('button', { class: 'btn primary small', onclick: () => guarded(apply, async () => {
+    const body = { tasks: [...selected], changes: changes() };
+    const res = await api('/tasks/bulk', { method: 'POST', body });
+    selected.clear();
+    toast(`${plural(res.updated, 'task')} updated${res.unchanged ? `, ${res.unchanged} already up to date` : ''}${res.failed ? `, ${res.failed} refused` : ''}`, res.failed ? 'error' : 'ok');
+    if (res.failed) bulkReport(res);
+    await onDone();
+  }) }, 'Apply');
+  const el = h('div', { class: 'bulk-bar hidden', role: 'region', 'aria-label': 'Bulk actions' }, count, h('span', { class: 'small muted', text: 'Change' }), fieldSel, valueBox, apply,
+    h('button', { class: 'btn ghost small', onclick: () => { selected.clear(); for (const box of $$('input.row-check, input.select-all', el.parentNode)) { box.checked = false; box.indeterminate = false; } update(); } }, 'Clear selection'));
+  function update() {
+    el.classList.toggle('hidden', selected.size === 0);
+    count.textContent = `${selected.size} selected`;
+  }
+  buildValue();
+  return { el, update };
+}
+// Tasks the server refused are listed with the reason, so nothing fails silently.
+function bulkReport(res) {
+  const rows = res.results.filter((r) => r.result === 'failed');
+  const m = openModal({ title: `${plural(rows.length, 'task')} could not be changed`, narrow: true,
+    content: h('div', { class: 'stack' }, h('p', { class: 'small muted', text: 'The other tasks were saved.' }),
+      rows.map((r) => h('div', { class: 'item' }, h('strong', { class: 'nowrap', text: r.key }), h('span', { class: 'grow small', text: new ApiError(409, r.error).message })))),
+    footer: [h('button', { class: 'btn primary', onclick: () => m.close() }, 'OK')] });
 }
 async function downloadCsv(key) {
   try {
@@ -804,7 +903,18 @@ function describeActivity(a) {
     case 'task.updated': return `updated ${t} (${change(d.changes)})`;
     case 'task.status_changed': return `moved ${t}: ${change(d.changes)}`;
     case 'task.deleted': return `deleted ${t} \u201c${d.title}\u201d`;
-    case 'task.dependency_added': return `made ${d.blocker} block ${d.blocked}`;
+    case 'task.dependency_added': return `made ${d.blocker} block ${d.blocked}${d.type && d.type !== 'finish_to_start' ? ` (${DEP_TYPE_LABEL[d.type]})` : ''}${d.lag_days ? ` with ${lagText(d.lag_days)}` : ''}`;
+    case 'task.dependency_updated': return `changed the dependency of ${d.blocker} on ${d.blocked}: ${Object.entries(d.changes || {}).map(([f, [o, n]]) => (f === 'type' ? `${DEP_TYPE_LABEL[o]} \u2192 ${DEP_TYPE_LABEL[n]}` : `lag ${o} \u2192 ${n} days`)).join('; ')}`;
+    case 'task.link_added': return `linked ${t} ${LINK_LABEL[d.type] || d.type} ${d.other}`;
+    case 'task.link_removed': return `removed the link between ${t} and ${d.other}`;
+    case 'checklist.added': return `added \u201c${d.text}\u201d to the checklist of ${t}`;
+    case 'checklist.checked': return `ticked \u201c${d.text}\u201d on ${t}`;
+    case 'checklist.unchecked': return `unticked \u201c${d.text}\u201d on ${t}`;
+    case 'checklist.edited': return `changed the checklist item \u201c${d.text}\u201d on ${t} to \u201c${d.new_text}\u201d`;
+    case 'checklist.moved': return `moved \u201c${d.text}\u201d to position ${d.position} on the checklist of ${t}`;
+    case 'checklist.removed': return `removed \u201c${d.text}\u201d from the checklist of ${t}`;
+    case 'watcher.added': return d.self ? `started watching ${t}` : `added ${d.user} as a watcher of ${t}`;
+    case 'watcher.removed': return d.self ? `stopped watching ${t}` : `removed ${d.user} from the watchers of ${t}`;
     case 'task.dependency_removed': return `removed the dependency between ${t} and ${d.other}`;
     case 'comment.added': return `commented on ${t}${d.mentions && d.mentions.length ? ' (mentioned ' + d.mentions.join(', ') + ')' : ''}`;
     case 'comment.edited': return `edited a comment on ${t}`;
@@ -969,7 +1079,7 @@ async function openTask(key) {
   const editable = canWrite(project);
   let dirty = false, comments = [], time = [], acts = [];
   // Typed-but-unsent text survives the re-render that follows every saved field change.
-  const drafts = { description: null, comment: '', subtask: '', depKey: '', depDir: 'blocked_by', hours: '', day: state.today, note: '' };
+  const drafts = { description: null, comment: '', subtask: '', depKey: '', depDir: 'blocked_by', depType: 'finish_to_start', depLag: '', linkKey: '', linkType: 'relates_to', checkText: '', watcher: '', hours: '', day: state.today, note: '' };
   const track = (name) => (e) => { drafts[name] = e.target.value; };
   const body = h('div');
   const handle = openModal({ title: null, content: body, onClose: () => { if (dirty) route(); } });
@@ -1011,6 +1121,7 @@ async function openTask(key) {
       field('Labels', h('input', { type: 'text', value: task.labels.join(', '), disabled: !editable, placeholder: 'comma separated', onchange: (e) => patch({ labels: e.target.value.split(/[,\s]+/).filter(Boolean) }) })),
       h('div', { class: 'small muted' }, h('div', { text: `Reporter: ${task.reporter ? task.reporter.display_name : '\u2014'}` }), h('div', { text: `Created ${fmtAgo(task.created_at)}` }), h('div', { text: `Updated ${fmtAgo(task.updated_at)}` }), task.completed_at ? h('div', { text: `Closed ${fmtAgo(task.completed_at)}` }) : null,
         task.external_ref ? h('div', { text: `Imported from ${task.external_ref}` }) : null, task.parent ? h('div', {}, 'Subtask of ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); switchTo(task.parent); } }, task.parent)) : null),
+      watchersBox(),
       hasRole('manager') && project.status !== 'archived' ? h('button', { class: 'btn danger small', onclick: act(deleteTask) }, 'Delete task') : null);
 
     put(body,
@@ -1018,7 +1129,7 @@ async function openTask(key) {
         task.blocked_by_open ? badge('blocked', `Waiting on ${task.blocked_by_open}`) : null, h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', 'aria-label': 'Close', onclick: () => handle.close() }, '\u2715')),
       project.status === 'archived' ? h('p', { class: 'small muted', text: 'This project is archived, so its tasks are read-only.' }) : !editable ? h('p', { class: 'small muted', text: 'You have read-only access to this task.' }) : null,
       h('div', { class: 'task-layout' }, h('div', {}, title, h('div', { class: 'stack', style: { marginTop: '8px' } }, desc, saveDesc),
-        subtasksSection(), dependenciesSection(), timeSection(), commentsSection(), activitySection()), side));
+        checklistSection(), subtasksSection(), dependenciesSection(), linksSection(), timeSection(), commentsSection(), activitySection()), side));
   }
 
   async function switchTo(otherKey) { handle.close(); openTask(otherKey); }
@@ -1039,15 +1150,115 @@ async function openTask(key) {
       task.subtask_list.map((s) => h('div', { class: 'item' }, statusBadge(s.status), h('a', { href: '#', class: 'grow', onclick: (e) => { e.preventDefault(); switchTo(s.key); } }, h('strong', { text: s.key }), ' ', s.title), h('span', { class: 'small muted', text: s.assignee || '' }))),
       editable ? h('div', { class: 'row', style: { marginTop: '6px' } }, input, add) : null);
   }
+  function depLabel(d) {
+    const lag = lagText(d.lag_days);
+    return `${DEP_TYPE_SHORT[d.type]}${lag ? ' \u00b7 ' + lag : ''}`;
+  }
   function dependenciesSection() {
     const input = h('input', { type: 'text', placeholder: 'Task key, e.g. ' + task.project + '-1', 'aria-label': 'Related task key', value: drafts.depKey, oninput: track('depKey') });
     const dir = h('select', { 'aria-label': 'Relationship', value: drafts.depDir, onchange: track('depDir') }, optionList([['blocked_by', 'is blocked by'], ['blocks', 'blocks']]));
-    const add = h('button', { class: 'btn small', onclick: act(async () => { if (!input.value.trim()) return; await api(`/tasks/${key}/dependencies`, { method: 'POST', body: { [dir.value]: input.value.trim().toUpperCase() } }); drafts.depKey = ''; await reload(); }) }, 'Link');
-    const rows = (list, label) => list.map((d) => h('div', { class: 'item' }, h('span', { class: 'small muted nowrap', text: label }), statusBadge(d.status), h('a', { href: '#', class: 'grow', onclick: (e) => { e.preventDefault(); switchTo(d.key); } }, h('strong', { text: d.key }), ' ', d.title),
-      editable ? h('button', { class: 'btn ghost small', 'aria-label': `Remove link to ${d.key}`, onclick: act(async () => { await api(`/tasks/${key}/dependencies/${d.key}`, { method: 'DELETE' }); await reload(); }) }, '\u2715') : null));
-    return h('div', { class: 'section' }, h('h3', { text: 'Dependencies' }), rows(task.blocked_by, 'blocked by'), rows(task.blocks, 'blocks'),
+    const type = h('select', { 'aria-label': 'Dependency type', title: DEP_TYPE_HELP[drafts.depType], value: drafts.depType, onchange: (e) => { drafts.depType = e.target.value; e.target.title = DEP_TYPE_HELP[drafts.depType]; } },
+      optionList(state.meta.dependency_types.map((t) => [t, DEP_TYPE_LABEL[t]])));
+    const lag = h('input', { type: 'number', step: 1, min: -state.meta.max_lag_days, max: state.meta.max_lag_days, placeholder: 'lag (days)', 'aria-label': 'Lag in days (negative for lead)', title: 'Days to wait after the blocker (negative: may overlap by that many days)', style: { width: '110px' }, value: drafts.depLag, oninput: track('depLag') });
+    const add = h('button', { class: 'btn small', onclick: act(async () => {
+      if (!input.value.trim()) return;
+      const body = { [dir.value]: input.value.trim().toUpperCase(), type: type.value };
+      if (lag.value !== '') body.lag_days = Number(lag.value);
+      await api(`/tasks/${key}/dependencies`, { method: 'POST', body });
+      drafts.depKey = ''; drafts.depLag = ''; await reload();
+    }) }, 'Link');
+    const rows = (list, label, mine) => list.map((d) => {
+      const conflict = d.schedule && d.schedule.conflict;
+      const when = d.schedule ? `${d.schedule.applies_to === 'start' ? 'start' : 'finish'} no earlier than ${fmtDate(d.schedule.not_before)}` : '';
+      return h('div', { class: 'item' }, h('span', { class: 'small muted nowrap', text: label }),
+        h('span', { class: 'chip nowrap', title: `${DEP_TYPE_LABEL[d.type]}. ${DEP_TYPE_HELP[d.type]}`, text: depLabel(d) }),
+        statusBadge(d.status), h('a', { href: '#', class: 'grow', onclick: (e) => { e.preventDefault(); switchTo(d.key); } }, h('strong', { text: d.key }), ' ', d.title),
+        conflict ? h('span', { class: 'badge overdue', title: `${mine ? 'This task is' : d.key + ' is'} planned before the dependency allows: should ${when}`, text: '\u26A0 dates' }) : null,
+        editable ? h('button', { class: 'btn ghost small', 'aria-label': `Edit dependency on ${d.key}`, onclick: () => editDependency(d) }, 'Edit') : null,
+        editable ? h('button', { class: 'btn ghost small', 'aria-label': `Remove link to ${d.key}`, onclick: act(async () => { await api(`/tasks/${key}/dependencies/${d.key}`, { method: 'DELETE' }); await reload(); }) }, '\u2715') : null);
+    });
+    return h('div', { class: 'section' }, h('h3', { text: 'Dependencies' }), rows(task.blocked_by, 'blocked by', true), rows(task.blocks, 'blocks', false),
       !task.blocked_by.length && !task.blocks.length ? h('div', { class: 'small muted', text: 'No dependencies.' }) : null,
-      editable ? h('div', { class: 'row', style: { marginTop: '6px' } }, dir, input, add) : null);
+      editable ? h('div', { class: 'form-row', style: { marginTop: '6px' } }, dir, input, type, lag, add) : null);
+  }
+  function editDependency(d) {
+    const type = h('select', { 'aria-label': 'Dependency type', value: d.type }, optionList(state.meta.dependency_types.map((t) => [t, DEP_TYPE_LABEL[t]])));
+    const lag = h('input', { type: 'number', step: 1, min: -state.meta.max_lag_days, max: state.meta.max_lag_days, value: d.lag_days, 'aria-label': 'Lag in days' });
+    const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => {
+      await api(`/tasks/${key}/dependencies/${d.key}`, { method: 'PATCH', body: { type: type.value, lag_days: lag.value === '' ? 0 : Number(lag.value) } });
+      m.close(); await reload();
+    }) }, 'Save');
+    const m = openModal({ title: `Dependency on ${d.key}`, narrow: true, content: h('div', { class: 'stack' },
+      field('Type', type, 'Finish \u2192 Start is the usual one: the blocked task waits for the blocker to finish.'),
+      field('Lag (days)', lag, 'Positive: wait this many days after. Negative: may overlap by that many days. Dates are only checked, never moved.')),
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
+  }
+  function linksSection() {
+    const input = h('input', { type: 'text', placeholder: 'Task key, e.g. ' + task.project + '-2', 'aria-label': 'Task to link', value: drafts.linkKey, oninput: track('linkKey') });
+    const type = h('select', { 'aria-label': 'Link type', value: drafts.linkType, onchange: track('linkType') }, optionList(state.meta.link_types.map((t) => [t, LINK_LABEL[t]])));
+    const add = h('button', { class: 'btn small', onclick: act(async () => {
+      if (!input.value.trim()) return;
+      await api(`/tasks/${key}/links`, { method: 'POST', body: { type: type.value, task: input.value.trim().toUpperCase() } });
+      drafts.linkKey = ''; await reload();
+    }) }, 'Add relation');
+    return h('div', { class: 'section' }, h('h3', { text: 'Related tasks' }),
+      task.links.map((l) => h('div', { class: 'item' }, h('span', { class: 'small muted nowrap', text: LINK_LABEL[l.type] }), statusBadge(l.task.status),
+        h('a', { href: '#', class: 'grow', onclick: (e) => { e.preventDefault(); switchTo(l.task.key); } }, h('strong', { text: l.task.key }), ' ', l.task.title),
+        editable ? h('button', { class: 'btn ghost small', 'aria-label': `Remove relation to ${l.task.key}`, onclick: act(async () => { await api(`/tasks/${key}/links/${l.task.key}`, { method: 'DELETE' }); await reload(); }) }, '\u2715') : null)),
+      !task.links.length ? h('div', { class: 'small muted', text: 'Nothing related. These links are for reference only; they never block work.' }) : null,
+      editable ? h('div', { class: 'form-row', style: { marginTop: '6px' } }, type, input, add) : null);
+  }
+  function checklistSection() {
+    const items = task.checklist_items;
+    const done = items.filter((i) => i.done).length;
+    const input = h('input', { type: 'text', placeholder: 'Add a checklist item\u2026', maxlength: state.meta.max_checklist_text, 'aria-label': 'New checklist item', value: drafts.checkText, oninput: track('checkText'),
+      onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); add.click(); } } });
+    const add = h('button', { class: 'btn small', onclick: act(async () => {
+      if (!input.value.trim()) return;
+      await api(`/tasks/${key}/checklist`, { method: 'POST', body: { text: input.value.trim() } });
+      drafts.checkText = ''; await reload();
+      const next = $('input[aria-label="New checklist item"]', body); // ready for the next item
+      if (next) next.focus();
+    }) }, 'Add');
+    const row = (i, index) => h('div', { class: 'item check-item' + (i.done ? ' done' : '') },
+      h('input', { type: 'checkbox', checked: i.done, disabled: !editable, 'aria-label': i.text, title: i.done && i.done_by ? `Done by ${i.done_by.display_name} ${fmtAgo(i.done_at)}` : null, onchange: async (e) => {
+        const box = e.currentTarget;
+        box.disabled = true;
+        try { await api('/checklist/' + i.id, { method: 'PATCH', body: { done: box.checked } }); await reload(); } catch (err) { toast(err.message, 'error'); box.checked = !box.checked; box.disabled = false; }
+      } }),
+      h('span', { class: 'grow check-text', text: i.text }),
+      editable ? h('span', { class: 'row', style: { gap: '2px' } },
+        h('button', { class: 'btn ghost small', 'aria-label': `Move ${i.text} up`, disabled: index === 0, onclick: act(async () => { await api('/checklist/' + i.id, { method: 'PATCH', body: { position: index } }); await reload(); }) }, '\u25B2'),
+        h('button', { class: 'btn ghost small', 'aria-label': `Move ${i.text} down`, disabled: index === items.length - 1, onclick: act(async () => { await api('/checklist/' + i.id, { method: 'PATCH', body: { position: index + 2 } }); await reload(); }) }, '\u25BC'),
+        h('button', { class: 'btn ghost small', 'aria-label': `Edit ${i.text}`, onclick: () => editChecklistItem(i) }, 'Edit'),
+        h('button', { class: 'btn ghost small', 'aria-label': `Delete ${i.text}`, onclick: act(async () => { await api('/checklist/' + i.id, { method: 'DELETE' }); await reload(); }) }, '\u2715')) : null);
+    return h('div', { class: 'section' }, h('h3', { text: `Checklist${items.length ? ` (${done}/${items.length})` : ''}` }),
+      items.length ? h('div', { class: 'row', style: { marginBottom: '4px' } }, progressBar((100 * done) / items.length, done === items.length ? 'ok' : '')) : null,
+      items.map(row),
+      !items.length && !editable ? h('div', { class: 'small muted', text: 'No checklist items.' }) : null,
+      editable ? h('div', { class: 'row', style: { marginTop: '6px' } }, input, add) : null);
+  }
+  function editChecklistItem(i) {
+    const area = h('input', { type: 'text', value: i.text, maxlength: state.meta.max_checklist_text, 'aria-label': 'Checklist item text' });
+    const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => { await api('/checklist/' + i.id, { method: 'PATCH', body: { text: area.value } }); m.close(); await reload(); }) }, 'Save');
+    const m = openModal({ title: 'Edit checklist item', narrow: true, content: area, footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
+  }
+  function watchersBox() {
+    const mine = task.watching;
+    const others = state.users.filter((u) => !task.watchers.some((w) => w.username === u.username));
+    const toggle = h('button', { class: 'btn small' + (mine ? '' : ' primary'), 'aria-pressed': String(mine), disabled: !mine && project.status === 'archived',
+      onclick: act(async () => {
+        if (mine) await api(`/tasks/${key}/watchers/${state.me.username}`, { method: 'DELETE' });
+        else await api(`/tasks/${key}/watchers`, { method: 'POST', body: {} });
+        await reload();
+      }) }, mine ? 'Stop watching' : 'Watch');
+    const picker = h('select', { 'aria-label': 'Add a watcher', value: drafts.watcher, onchange: track('watcher') }, optionList([['', 'Add someone\u2026'], ...userPairs(others)]));
+    const addOther = h('button', { class: 'btn small', onclick: act(async () => { if (!picker.value) return; await api(`/tasks/${key}/watchers`, { method: 'POST', body: { username: picker.value } }); drafts.watcher = ''; await reload(); }) }, 'Add');
+    return h('div', { class: 'watch-box' }, h('div', { class: 'row' }, h('strong', { class: 'small', text: `Watchers (${task.watchers.length})` }), h('span', { class: 'spacer' }), toggle),
+      task.watchers.length ? task.watchers.map((w) => h('div', { class: 'row small' }, avatar(w), h('span', { class: 'grow ellipsis', text: w.display_name }),
+        editable || w.username === state.me.username ? h('button', { class: 'btn ghost small', 'aria-label': `Remove ${w.display_name} from watchers`, onclick: act(async () => { await api(`/tasks/${key}/watchers/${w.username}`, { method: 'DELETE' }); await reload(); }) }, '\u2715') : null))
+        : h('div', { class: 'small muted', text: 'Nobody is following this task.' }),
+      editable ? h('div', { class: 'row' }, picker, addOther) : null);
   }
   function timeSection() {
     const hours = h('input', { type: 'number', min: 0.25, max: 24, step: '0.25', placeholder: 'hours', 'aria-label': 'Hours', style: { width: '100px' }, value: drafts.hours, oninput: track('hours') });
