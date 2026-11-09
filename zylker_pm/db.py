@@ -5,7 +5,39 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Added in schema v2. Shared by fresh databases (SCHEMA) and the v1 -> v2 migration so the two can never drift.
+PROJECT_FIELDS_SCHEMA = """
+CREATE TABLE project_fields (
+    id INTEGER PRIMARY KEY,
+    key TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    type TEXT NOT NULL CHECK (type IN ('text','number','url')),
+    description TEXT NOT NULL DEFAULT '',
+    required INTEGER NOT NULL DEFAULT 0 CHECK (required IN (0,1)),
+    max_length INTEGER CHECK (max_length IS NULL OR (max_length >= 1 AND max_length <= 2000)),
+    min_value REAL,
+    max_value REAL,
+    decimals INTEGER CHECK (decimals IS NULL OR (decimals >= 0 AND decimals <= 3)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE project_field_values (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    field_id INTEGER NOT NULL REFERENCES project_fields(id) ON DELETE CASCADE,
+    text_value TEXT,
+    number_value REAL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, field_id),
+    CHECK ((text_value IS NULL) <> (number_value IS NULL))
+);
+CREATE INDEX idx_pfv_field ON project_field_values (field_id);
+"""
+
+# Each entry upgrades a database from version N to N + 1, inside one transaction.
+MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA}
 
 SCHEMA = """
 CREATE TABLE users (
@@ -131,7 +163,7 @@ CREATE TABLE activity (
 );
 CREATE INDEX idx_activity_project ON activity (project_id, id);
 CREATE INDEX idx_activity_task ON activity (task_id, id);
-"""
+""" + PROJECT_FIELDS_SCHEMA
 
 
 def connect(path: str) -> sqlite3.Connection:
@@ -147,7 +179,7 @@ def connect(path: str) -> sqlite3.Connection:
 
 
 def init_db(path: str) -> None:
-    """Create the schema on a new database; refuse databases from the future."""
+    """Create the schema on a new database, upgrade an older one, refuse one from the future."""
     conn = connect(path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -158,8 +190,23 @@ def init_db(path: str) -> None:
             raise RuntimeError(
                 "Database schema v%d is newer than this application (v%d)" % (version, SCHEMA_VERSION)
             )
+        else:
+            while version < SCHEMA_VERSION:
+                _migrate(conn, version)
+                version += 1
     finally:
         conn.close()
+
+
+def _migrate(conn: sqlite3.Connection, version: int) -> None:
+    """All-or-nothing: a failed migration leaves the database exactly as it was."""
+    script = "BEGIN IMMEDIATE;\n%s\nPRAGMA user_version = %d;\nCOMMIT;" % (MIGRATIONS[version], version + 1)
+    try:
+        conn.executescript(script)
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
 
 
 @contextmanager
