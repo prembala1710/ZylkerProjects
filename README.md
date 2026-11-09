@@ -11,8 +11,14 @@ standard library alone - **no packages to install, no build step** - and stores 
   and time logging.
 - **A workflow that enforces itself** - allowed status moves are defined once; a task cannot start or finish while a blocking task
   is open, and a parent cannot close while subtasks are open. The UI shows *why* a move was refused.
-- **Dependencies with deadlock protection** - "blocked by" links between tasks of a project. Loops are refused, including the
+- **Dependencies with deadlock protection** - "blocked by" links between tasks of a project: finish-to-start, start-to-start or
+  finish-to-finish, each with an optional lag or lead in days (see [Dependencies](#dependencies)). Loops are refused, including the
   sneaky kind that run through parent/subtask relationships.
+- **Checklists, watchers and related tasks** - lightweight tick-box items inside a task, people who follow a task without being its
+  assignee, and "relates to" / "duplicates" / "cloned from" links that never block anything (see
+  [Checklists, watchers and links](#checklists-watchers-and-links)).
+- **Bulk actions** - tick tasks in the List view and change their status, assignee, priority, labels, milestone or due date in one go;
+  anything the server refuses is listed with the reason (see [Bulk actions](#bulk-actions)).
 - **Boards, lists and a timeline** - drag-and-drop Kanban board, sortable/filterable list, and a Gantt-style timeline with
   milestones and the critical path highlighted.
 - **Health you can trust** - every project gets an on-track / at-risk / off-track status with the *reasons* spelled out
@@ -90,8 +96,43 @@ and shown in the project header. At most 20 fields.
 - **Audited.** Value changes appear in the project's activity feed (`Client: Acme -> Beta`); definition changes in the admin audit trail.
 - **Searchable.** The project search box also matches text and URL values.
 
-Databases created by an earlier release are upgraded automatically the first time they are opened (schema v1 to v2, in one transaction;
+Databases created by an earlier release are upgraded automatically the first time they are opened (schema v1 to v3, one transaction per step;
 a failed upgrade changes nothing).
+
+## Checklists, watchers and links
+
+**Checklists.** A task can carry up to 50 checklist items: text and a tick box, in an order you can change (Task dialog -> *Checklist*). Use them for
+the small steps that do not deserve a task of their own. They are deliberately *not* part of the workflow: unticked items never stop a task being closed and
+ticking everything does not close it. When a step needs an owner, a due date or a gate, make it a subtask. Lists and the board show progress as `2/5`.
+
+**Watchers.** *Watch* a task (Task dialog, right-hand side) to follow it without being the assignee. Anyone signed in, viewers included, can follow or
+unfollow themselves; adding other people needs write access to the project. When a watched task changes or gets a comment, the Zoho Cliq message about it ends
+with `Watching: ...` naming the followers - the webhook posts to one channel, so this is a mention by name, not a private message, and the person who made the
+change is never named. The task list filter `watcher=me` shows everything you follow.
+
+**Related tasks.** *Relates to*, *duplicates* / *is duplicated by* and *is cloned from* / *was cloned to* connect tasks for reference, even across projects (you need
+write access to both). They never block anything, take no part in deadlock checks and do not affect health. Two tasks can have one link between them.
+
+## Dependencies
+
+A dependency makes one task (the *blocked* one) wait for another (the *blocker*), and has a type:
+
+| Type | The blocked task cannot... | until the blocker... |
+|---|---|---|
+| **Finish -> Start** (default) | start | is finished |
+| **Start -> Start** | start | has started |
+| **Finish -> Finish** | finish (it may start earlier) | is finished |
+
+*Lag* (days, positive) and *lead* (negative) say when the dates *should* fall, for example "start 2 days after the blocker finishes". They never move a task and never block a
+status change; the task dialog flags a link with a warning when the planned dates already break it. Cancelled and done blockers never hold anybody up. Existing dependencies
+become plain finish-to-start links with no lag. The critical path (effort hours, not dates) follows finish-to-start links only.
+
+## Bulk actions
+
+In a project's *List* tab, tick tasks (or the header box for the whole page) and use the bar that appears: pick what to change - status, priority, assignee, milestone,
+due date, add a label, remove a label - and *Apply*. Every task goes through the same rules as editing it alone, so refused tasks (a blocked task, a member who is not in
+the project, an archived project...) are listed with the reason and the others are saved. The same call is available as `POST /api/tasks/bulk` with up to 100 tasks, several
+fields at once and an optional all-or-nothing mode (see `docs/API.md`). Cliq gets one summary message, not one per task.
 
 ## Roles
 
@@ -109,15 +150,17 @@ The server is the authority: the UI hides controls a role cannot use, but every 
 
 **Workflow.** `todo -> in_progress -> in_review -> done`, plus `blocked` and `cancelled`; done and cancelled tasks can be
 reopened to `todo` (and done to `in_progress`). The complete map is returned by `GET /api/meta`. Moving a task to
-`in_progress`, `in_review` or `done` is refused while any of its blockers is open (done or cancelled blockers do not block).
+`in_progress`, `in_review` or `done` is refused while a dependency still holds it back - by default a blocker that is not finished; start-to-start
+and finish-to-finish dependencies hold back less (see [Dependencies](#dependencies)). Done or cancelled blockers never block.
 Setting a task to `blocked` is always allowed - it is the manual "waiting on something outside the system" flag.
 
 **Hierarchy.** Subtasks nest up to five levels. A parent cannot be closed while a subtask is open, an open subtask cannot be
 added under (or reopened beneath) a closed parent, and deleting a parent needs `?cascade=true`.
 
-**Dependencies.** Finish-to-start, same project only. A *deadlock* is a cycle in the combined graph of dependencies and
-"child must finish before parent". Checking the combined graph is what catches `parent -> X -> child` loops: a parent can
-never be made to wait for its own subtask. The refusal names the loop, e.g. `WEB-3 -> WEB-1 -> WEB-2 -> WEB-3`.
+**Dependencies.** Same project only. A *deadlock* is a cycle in the combined graph of dependencies and "child must finish before
+parent". The graph is built from *start* and *finish* events of each task, so the three dependency types combine correctly (B starts after A starts
+while A finishes after B finishes is fine; A finishes before B starts while B starts before A starts is not). Checking the combined graph is what
+catches `parent -> X -> child` loops: a parent can never be made to wait for its own subtask. The refusal names the loop, e.g. `WEB-3 -> WEB-1 -> WEB-2 -> WEB-3`.
 
 **Auditability.** Every create, update, status change, link, comment and time entry is recorded with who and when; edits store
 old and new values.
@@ -157,6 +200,8 @@ Cliq outage never fails a request, and nothing is sent for a request that was ro
 - a task is assigned to someone other than the person who assigned it
 - a task is completed, or marked blocked
 - someone is `@mentioned` in a comment
+- a task someone watches changes or is commented on (the message names the watchers)
+- a bulk action changes several tasks (one summary message, not one per task)
 - a project's status changes
 - the digest, when you run `zylker-pm digest --post`
 
@@ -221,9 +266,9 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~230 tests, no dependencies
+python -m unittest discover -s tests -v     # ~370 tests, no dependencies
 pip install playwright && playwright install chromium
-python -m unittest tests.test_ui_e2e -v      # 25 real-browser tests (skipped automatically without Playwright)
+python -m unittest tests.test_ui_e2e -v      # 37 real-browser tests (skipped automatically without Playwright)
 ```
 
 The backend tests include hand-computed expectations for the critical path, workload, burndown and health rules, deadlock
@@ -241,8 +286,10 @@ tests/                 unit, HTTP, CLI and browser tests
 
 ## Limitations and ideas for later
 
-Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), recurring tasks, task templates or
-attachments; custom project fields cannot be reordered or filtered on yet; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
-permissions would be the natural next steps for a larger organisation.
+Dependencies are within one project, and lag/lead only flags dates - it never reschedules anything, and the critical path (effort hours) follows finish-to-start links only; related-task links are
+informational and cannot be listed or filtered across the whole organisation yet; checklist items have no assignee or date and are not in the CSV export; watchers are named in the shared Cliq channel
+rather than messaged privately, and nobody is made a watcher automatically; bulk actions work from the List tab (not the board) and cover status, assignee, priority, labels, milestone and due date only;
+there are no custom fields on tasks (only on projects), recurring tasks, task templates or attachments; custom project fields cannot be reordered or filtered on yet; the burndown does not remember reopened
+tasks; the timeline draws no dependency arrows; SSO and per-project read permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
