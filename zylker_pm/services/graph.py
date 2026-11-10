@@ -109,6 +109,39 @@ def find_cycle(conn, project_id, add=(), remove=()):
     return None
 
 
+class CycleGuard:
+    """Cycle checks for many new dependencies at once (an import): the graph is built a single time and grows as edges
+    are accepted, where ``find_cycle`` rebuilds it for every edge. Both give the same answers."""
+
+    def __init__(self, conn, project_id):
+        self._adj, self._known = {}, set()
+        for edge in sorted(dependency_edges(conn, project_id) | hierarchy_edges(conn, project_id)):
+            self._insert(edge)
+
+    def _insert(self, edge):
+        a, b = _event_edge(edge)
+        for task in edge[:2]:
+            if task not in self._known:
+                self._known.add(task)
+                self._adj.setdefault((task, START), []).append((task, FINISH))
+        self._adj.setdefault(a, []).append(b)
+
+    def add(self, edge):
+        """Accept ``(blocker_id, blocked_id, kind)`` unless it would close a loop; returns the loop (as ``find_cycle``
+        does) when it would, and None when the edge was added."""
+        for task in edge[:2]:  # a task that has no edge yet still has to be able to lead from its start to its finish
+            if task not in self._known:
+                self._known.add(task)
+                self._adj.setdefault((task, START), []).append((task, FINISH))
+        a, b = _event_edge(edge)
+        path = _path(self._adj, b, a)
+        if path is not None:
+            ids = [event[0] for event in [a] + path]
+            return [t for i, t in enumerate(ids) if i == 0 or t != ids[i - 1]]
+        self._insert(edge)
+        return None
+
+
 def blocking_links(conn, task_id, new_status):
     """Dependencies that stop ``task_id`` from moving into ``new_status`` right now.
 
