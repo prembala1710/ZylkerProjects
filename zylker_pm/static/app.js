@@ -34,6 +34,7 @@ const h = (tag, attrs, ...kids) => make((t) => document.createElement(t), tag, a
 const put = (el, ...kids) => { addChildren(el, kids); return el; };
 const sv = (tag, attrs, ...kids) => make((t) => document.createElementNS(SVG_NS, t), tag, attrs, kids);
 const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const clear = (el) => el.replaceChildren();
 
 /* ============================== constants & formatting ============================== */
@@ -44,8 +45,17 @@ const HEALTH_LABEL = { on_track: 'On track', at_risk: 'At risk', off_track: 'Off
 const PROJECT_STATUS_LABEL = { planning: 'Planning', active: 'Active', on_hold: 'On hold', completed: 'Completed', archived: 'Archived' };
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const ROLES = ['viewer', 'member', 'manager', 'admin'];
+const DEP_TYPE_LABEL = { finish_to_start: 'Finish \u2192 Start', start_to_start: 'Start \u2192 Start', finish_to_finish: 'Finish \u2192 Finish' };
+const DEP_TYPE_SHORT = { finish_to_start: 'FS', start_to_start: 'SS', finish_to_finish: 'FF' };
+const DEP_TYPE_HELP = {
+  finish_to_start: 'The blocked task cannot start until the blocker is finished.',
+  start_to_start: 'The blocked task cannot start until the blocker has started.',
+  finish_to_finish: 'The blocked task cannot finish until the blocker is finished.',
+};
+const LINK_LABEL = { relates_to: 'relates to', duplicates: 'duplicates', duplicated_by: 'is duplicated by', cloned_from: 'is cloned from', cloned_to: 'was cloned to' };
+const lagText = (n) => (!n ? '' : n > 0 ? `${n}d lag` : `${-n}d lead`);
 
-const state = { token: null, me: null, meta: null, users: [], projects: [], today: '', pendingTask: null, projectCache: {} };
+const state = { token: null, me: null, meta: null, users: [], projects: [], fields: [], today: '', pendingTask: null, projectCache: {} };
 
 const parseDate = (s) => { if (!s) return null; const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const dayDiff = (a, b) => Math.round((parseDate(b) - parseDate(a)) / 86400000);
@@ -174,6 +184,81 @@ async function guarded(button, fn) {
   try { return await fn(); } catch (e) { toast(e.message, 'error'); } finally { button.disabled = false; }
 }
 
+/* ============================== custom project fields ============================== */
+const FIELD_TYPE_LABEL = { text: 'Text', number: 'Number', url: 'URL' };
+const fieldLabel = (key) => { const f = state.fields.find((x) => x.key === key); return f ? f.label : key; };
+const fmtNumber = (n, decimals) => new Intl.NumberFormat(undefined, { maximumFractionDigits: decimals ?? 3 }).format(n);
+const decimalPlaces = (text) => { const m = /^-?\d*\.(\d+)$/.exec(text); return m ? m[1].length : 0; };
+// Only http(s) addresses ever become links. Anything else (javascript:, data:, ...) is shown as plain text.
+function safeUrl(value) {
+  try { const u = new URL(value); return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null; } catch (e) { return null; }
+}
+function fieldValue(def, value) {
+  if (value === null || value === undefined || value === '') return h('span', { class: 'muted', text: '\u2014' });
+  if (def.type === 'number') return h('span', { text: fmtNumber(value, def.decimals) });
+  if (def.type === 'url') {
+    const href = safeUrl(value);
+    return href ? h('a', { href, target: '_blank', rel: 'noopener noreferrer nofollow', class: 'cf-link ellipsis', title: value, text: value }) : h('span', { text: value });
+  }
+  return h('span', { text: value });
+}
+function fieldRules(def) {
+  if (def.type === 'text') return `Up to ${def.max_length} characters`;
+  if (def.type === 'url') return 'http:// or https:// address';
+  const bits = [def.decimals === 0 ? 'Whole numbers' : `Up to ${plural(def.decimals, 'decimal place')}`];
+  if (def.min_value !== null) bits.push('min ' + fmtNumber(def.min_value, def.decimals));
+  if (def.max_value !== null) bits.push('max ' + fmtNumber(def.max_value, def.decimals));
+  return bits.join(', ');
+}
+// The browser checks these constraints first for instant feedback; the server re-checks all of them.
+function fieldControl(def, value, required) {
+  const shown = value === null || value === undefined ? '' : value;
+  const common = { value: shown, required, autocomplete: 'off', 'aria-describedby': null };
+  if (def.type === 'number') {
+    const el = h('input', { ...common, type: 'number', step: 'any', min: def.min_value, max: def.max_value, inputmode: def.decimals ? 'decimal' : 'numeric' });
+    el.addEventListener('input', () => el.setCustomValidity(decimalPlaces(el.value) > def.decimals ? (def.decimals ? `At most ${plural(def.decimals, 'decimal place')}` : 'Whole numbers only') : ''));
+    return el;
+  }
+  if (def.type === 'url') return h('input', { ...common, type: 'url', maxlength: state.meta.project_field_limits.max_url_length, placeholder: 'https://', inputmode: 'url', spellcheck: 'false', pattern: 'https?://.+', title: 'A web address starting with http:// or https://' });
+  return h('input', { ...common, type: 'text', maxlength: def.max_length });
+}
+// One input per defined field. A required field only blocks saving when the project has (or is getting) a value,
+// so projects that predate the field can still be edited.
+function customFieldsEditor(values, { creating, disabled }) {
+  const controls = {};
+  const node = h('div', { class: 'cf-grid' });
+  for (const def of state.fields) {
+    const current = values ? values[def.key] : null;
+    const el = fieldControl(def, current, def.required && (creating || (current !== null && current !== undefined)));
+    if (disabled) el.disabled = true;
+    controls[def.key] = { def, el };
+    node.append(field(def.label + (def.required ? ' *' : ''), el, def.description || fieldRules(def)));
+  }
+  return { controls, node };
+}
+function readControl(def, el) {
+  const raw = el.value.trim();
+  if (raw === '') return null;
+  return def.type === 'number' ? Number(raw) : raw;
+}
+// Only what changed (or, when creating, what was filled in); null clears a value.
+function collectCustom(controls, current) {
+  const out = {};
+  for (const [key, { def, el }] of Object.entries(controls)) {
+    const value = readControl(def, el);
+    const before = current && current[key] !== undefined ? current[key] : null;
+    if (value !== before) out[key] = value;
+  }
+  return out;
+}
+const controlsValid = (controls) => Object.values(controls).every(({ el }) => el.disabled || el.reportValidity());
+function customFieldSummary(project) {
+  const values = project.custom_fields || {};
+  const shown = state.fields.filter((d) => values[d.key] !== null && values[d.key] !== undefined);
+  if (!shown.length) return null;
+  return h('dl', { class: 'cf-summary' }, shown.map((d) => h('div', { class: 'cf-pair' }, h('dt', { text: d.label }), h('dd', {}, fieldValue(d, values[d.key])))));
+}
+
 /* ============================== session & shell ============================== */
 function saveToken(token, remember) {
   localStorage.removeItem('zpm_token'); sessionStorage.removeItem('zpm_token');
@@ -217,8 +302,8 @@ const logo = () => sv('svg', { width: 28, height: 28, viewBox: '0 0 32 32', 'ari
   sv('path', { d: 'M9 10h14l-9 12h9', fill: 'none', stroke: '#fff', 'stroke-width': 3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
 
 async function loadSession() {
-  const [me, meta, users, projects] = await Promise.all([api('/me'), api('/meta'), api('/users'), api('/projects')]);
-  Object.assign(state, { me, meta, users: users.items, projects: projects.items, today: meta.today });
+  const [me, meta, users, projects, fields] = await Promise.all([api('/me'), api('/meta'), api('/users'), api('/projects'), api('/project-fields')]);
+  Object.assign(state, { me, meta, users: users.items, projects: projects.items, fields: fields.items, today: meta.today });
 }
 async function refreshProjects() {
   state.projects = (await api('/projects')).items;
@@ -263,7 +348,8 @@ function renderShell() {
     h('div', { id: 'project-nav' }),
     hasRole('manager') ? h('button', { class: 'btn small', style: { margin: '8px 10px' }, onclick: openCreateProject }, '+ New project') : null,
     hasRole('admin') ? h('div', { class: 'nav-heading', text: 'Admin' }) : null,
-    hasRole('admin') ? h('a', { class: 'nav-link', href: '#/users', dataset: { route: 'users' } }, 'Users & access') : null);
+    hasRole('admin') ? h('a', { class: 'nav-link', href: '#/users', dataset: { route: 'users' } }, 'Users & access') : null,
+    hasRole('admin') ? h('a', { class: 'nav-link', href: '#/fields', dataset: { route: 'fields' } }, 'Project fields') : null);
 
   const topbar = h('header', { class: 'topbar' }, h('div', { class: 'search' }, searchBox, results), h('span', { class: 'spacer' }),
     avatar(state.me), h('div', { class: 'user-chip' }, h('div', { text: state.me.display_name }), h('div', { class: 'small muted', text: state.me.role })),
@@ -302,6 +388,7 @@ async function route() {
     else if (a === 'mine') await myTasksView(view, alive);
     else if (a === 'team') await teamView(view, alive);
     else if (a === 'users' && hasRole('admin')) await usersView(view, alive);
+    else if (a === 'fields' && hasRole('admin')) await fieldsView(view, alive);
     else await dashboardView(view, alive);
   } catch (e) {
     if (!alive() || !state.token) return;
@@ -543,6 +630,7 @@ async function teamView(view, alive) {
 /* ============================== task table (shared) ============================== */
 function taskTable(tasks, opts = {}) {
   const heads = [opts.showProject ? 'Task' : 'Key', 'Title', 'Status', 'Priority', 'Assignee', 'Due', 'Est / logged'];
+  const sel = opts.selection; // { selected: Set of task keys, onChange() } turns on the bulk-action checkboxes
   const th = (label) => {
     const sortable = opts.sort && opts.sortable && opts.sortable[label];
     if (!sortable) return h('th', { text: label });
@@ -551,24 +639,49 @@ function taskTable(tasks, opts = {}) {
       onclick: () => opts.onSort(sortable), onkeydown: (e) => { if (e.key === 'Enter') opts.onSort(sortable); } }, label, active ? (opts.sort.startsWith('-') ? ' \u25BE' : ' \u25B4') : '');
   };
   if (!tasks.length) return h('div', { class: 'empty', text: 'No tasks match.' });
-  return h('table', { class: 'table' }, h('thead', {}, h('tr', {}, heads.map(th))), h('tbody', {}, tasks.map((t) => h('tr', { class: 'click', tabindex: 0,
-    onclick: () => openTask(t.key), onkeydown: (e) => { if (e.key === 'Enter') openTask(t.key); } },
+  let table;
+  let selectAll = null;
+  const syncSelectAll = () => {
+    if (!selectAll) return;
+    const chosen = tasks.filter((t) => sel.selected.has(t.key)).length;
+    selectAll.checked = chosen === tasks.length;
+    selectAll.indeterminate = chosen > 0 && chosen < tasks.length;
+  };
+  if (sel) {
+    selectAll = h('input', { type: 'checkbox', class: 'select-all', 'aria-label': 'Select all tasks on this page', onchange: (e) => {
+      for (const t of tasks) { if (e.target.checked) sel.selected.add(t.key); else sel.selected.delete(t.key); }
+      for (const box of table.querySelectorAll('input.row-check')) box.checked = e.target.checked;
+      sel.onChange();
+    } });
+  }
+  const pick = (t) => h('td', { class: 'pick', onclick: (e) => e.stopPropagation() },
+    h('input', { type: 'checkbox', class: 'row-check', 'aria-label': 'Select ' + t.key, checked: sel.selected.has(t.key), onchange: (e) => {
+      if (e.target.checked) sel.selected.add(t.key); else sel.selected.delete(t.key);
+      syncSelectAll(); sel.onChange();
+    } }));
+  table = h('table', { class: 'table' }, h('thead', {}, h('tr', {}, sel ? h('th', { class: 'pick' }, selectAll) : null, heads.map(th))), h('tbody', {}, tasks.map((t) => h('tr', { class: 'click', tabindex: 0,
+    onclick: () => openTask(t.key), onkeydown: (e) => { if (e.key === 'Enter' && e.target === e.currentTarget) openTask(t.key); } },
+    sel ? pick(t) : null,
     h('td', { class: 'nowrap' }, h('strong', { text: t.key })),
     h('td', {}, t.title, t.parent ? h('span', { class: 'chip', style: { marginLeft: '6px' }, text: 'sub of ' + t.parent }) : null,
       t.blocked_by_open ? h('span', { class: 'chip', style: { marginLeft: '6px' }, title: 'Waiting on open tasks', text: '\u{1F512} ' + t.blocked_by_open }) : null,
+      t.checklist.total ? h('span', { class: 'chip', style: { marginLeft: '6px' }, title: 'Checklist items done', text: `\u2713 ${t.checklist.done}/${t.checklist.total}` }) : null,
       t.labels.map((l) => h('span', { class: 'chip', style: { marginLeft: '6px' }, text: l }))),
     h('td', {}, statusBadge(t.status)), h('td', {}, priorityBadge(t.priority)),
     h('td', {}, h('div', { class: 'row' }, avatar(t.assignee), t.assignee ? h('span', { class: 'small', text: t.assignee.display_name }) : null)),
     h('td', { class: 'nowrap' }, dueText(t) || '\u2014'),
     h('td', { class: 'nowrap small', text: `${fmtHours(t.estimate_hours)} / ${fmtHours(t.logged_hours || null)}` })))));
+  syncSelectAll();
+  return table;
 }
 
 /* ============================== project view ============================== */
 const TABS = [['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline'], ['milestones', 'Milestones'], ['reports', 'Reports'], ['activity', 'Activity'], ['settings', 'Settings']];
 
 async function projectView(view, key, tab, alive) {
-  const [project, summary] = await Promise.all([api('/projects/' + key), api(`/projects/${key}/summary`)]);
+  const [project, summary, fields] = await Promise.all([api('/projects/' + key), api(`/projects/${key}/summary`), api('/project-fields')]);
   state.projectCache[key] = project;
+  state.fields = fields.items; // another admin may have changed the definitions since sign-in
   if (!alive()) return;
   if (!TABS.some(([id]) => id === tab)) tab = 'board';
   clear(view);
@@ -580,6 +693,7 @@ async function projectView(view, key, tab, alive) {
       h('div', { class: 'titles' }, h('div', { class: 'row wrap' }, h('h1', { text: project.name }), badge(project.status, PROJECT_STATUS_LABEL[project.status]), healthBadge(s.health)),
         h('p', { class: 'muted' }, `${project.key} \u00b7 owner ${project.owner ? project.owner.display_name : '\u2014'} \u00b7 ${fmtDate(project.start_date)} \u2192 ${fmtDate(project.due_date)}`),
         project.description ? h('p', { class: 'small', text: project.description }) : null,
+        customFieldSummary(project),
         s.health.reasons.length ? h('ul', { class: 'reasons' }, s.health.reasons.map((r) => h('li', { text: r }))) : null),
       h('div', { style: { minWidth: '220px' } }, h('div', { class: 'row' }, progressBar(s.progress.tasks_pct, 'ok'), h('strong', { text: `${Math.round(s.progress.tasks_pct)}%` })),
         h('div', { class: 'small muted', text: `${m.done}/${m.leaf_tasks} done \u00b7 ${m.overdue} overdue \u00b7 ${m.blocked} waiting/blocked` })),
@@ -613,6 +727,7 @@ async function boardTab(root, ctx) {
       h('div', { class: 'title', text: t.title }),
       h('div', { class: 'meta' }, avatar(t.assignee), dueText(t),
         t.subtasks.total ? h('span', { title: 'Subtasks done', text: `\u2611 ${t.subtasks.done}/${t.subtasks.total}` }) : null,
+        t.checklist.total ? h('span', { title: 'Checklist items done', text: `\u2713 ${t.checklist.done}/${t.checklist.total}` }) : null,
         t.blocked_by_open ? h('span', { title: 'Waiting on open tasks', text: `\u{1F512} ${t.blocked_by_open}` }) : null,
         t.labels.slice(0, 2).map((l) => h('span', { class: 'chip', text: l }))));
     el.addEventListener('dragstart', (e) => {
@@ -683,31 +798,94 @@ async function listTab(root, ctx) {
   const { project, key } = ctx;
   const f = { status: '', assignee: '', priority: '', q: '', open: false, sort: 'key', offset: 0 };
   const LIMIT = 25;
+  const editable = canWrite(project);
+  const selected = new Set(); // task keys ticked for a bulk action; survives paging and sorting, cleared by any filter change
+  const milestones = editable ? (await api(`/projects/${key}/milestones`)).items : [];
   const results = h('div', { class: 'card flush' });
   const pager = h('div', { class: 'row small muted', style: { marginTop: '10px' } });
+  const bulk = editable ? bulkBar(selected, { project, milestones, onDone: () => load() }) : null;
   async function load() {
     const data = await api('/tasks', { query: { project: key, status: f.status, assignee: f.assignee, priority: f.priority, q: f.q, open: f.open ? 'true' : '', sort: f.sort, limit: LIMIT, offset: f.offset } });
     if (!ctx.alive()) return;
     clear(results);
     results.append(taskTable(data.items, { sort: f.sort, onSort: (field) => { f.sort = f.sort === field ? '-' + field : field; f.offset = 0; load(); },
-      sortable: { Key: 'key', Title: 'title', Status: 'status', Priority: 'priority', Assignee: 'assignee', Due: 'due_date' } }));
+      sortable: { Key: 'key', Title: 'title', Status: 'status', Priority: 'priority', Assignee: 'assignee', Due: 'due_date' },
+      selection: bulk ? { selected, onChange: bulk.update } : null }));
+    if (bulk) bulk.update();
     clear(pager);
     const end = Math.min(f.offset + LIMIT, data.total);
     pager.append(h('span', { text: data.total ? `${f.offset + 1}\u2013${end} of ${data.total}` : '0 tasks' }), h('span', { class: 'spacer' }),
       h('button', { class: 'btn small', disabled: f.offset === 0, onclick: () => { f.offset = Math.max(0, f.offset - LIMIT); load(); } }, '\u2039 Prev'),
       h('button', { class: 'btn small', disabled: end >= data.total, onclick: () => { f.offset += LIMIT; load(); } }, 'Next \u203A'));
   }
-  const set = (name, transform) => (e) => { f[name] = transform ? transform(e) : e.target.value; f.offset = 0; load(); };
+  const refilter = () => { f.offset = 0; selected.clear(); load(); };
+  const set = (name, transform) => (e) => { f[name] = transform ? transform(e) : e.target.value; refilter(); };
   let timer;
   root.append(h('div', { class: 'toolbar' },
-    h('input', { type: 'search', placeholder: 'Search title, description or key\u2026', 'aria-label': 'Search', oninput: (e) => { clearTimeout(timer); const v = e.target.value; timer = setTimeout(() => { f.q = v; f.offset = 0; load(); }, 250); } }),
+    h('input', { type: 'search', placeholder: 'Search title, description or key\u2026', 'aria-label': 'Search', oninput: (e) => { clearTimeout(timer); const v = e.target.value; timer = setTimeout(() => { f.q = v; refilter(); }, 250); } }),
     h('select', { 'aria-label': 'Status', onchange: set('status') }, optionList([['', 'Any status'], ...state.meta.statuses.map((s) => [s, STATUS_LABEL[s]])])),
     h('select', { 'aria-label': 'Priority', onchange: set('priority') }, optionList([['', 'Any priority'], ...state.meta.priorities.map((p) => [p, PRIORITY_LABEL[p]])])),
     h('select', { 'aria-label': 'Assignee', onchange: set('assignee') }, optionList([['', 'Anyone'], ['me', 'Me'], ['none', 'Unassigned'], ...userPairs(project.members)])),
     h('label', { class: 'row small' }, h('input', { type: 'checkbox', onchange: set('open', (e) => e.target.checked) }), 'Open only'),
     h('span', { class: 'spacer' }),
-    h('button', { class: 'btn', onclick: () => downloadCsv(key) }, 'Export CSV')), results, pager);
+    h('button', { class: 'btn', onclick: () => downloadCsv(key) }, 'Export CSV')), bulk ? bulk.el : null, results, pager);
   await load();
+}
+
+/* ---------- bulk actions (List tab) ---------- */
+const BULK_FIELDS = [['status', 'Status'], ['priority', 'Priority'], ['assignee', 'Assignee'], ['milestone', 'Milestone'], ['due_date', 'Due date'], ['add_labels', 'Add label'], ['remove_labels', 'Remove label']];
+function bulkBar(selected, { project, milestones, onDone }) {
+  const count = h('strong', { 'aria-live': 'polite' });
+  const fieldSel = h('select', { 'aria-label': 'Field to change', onchange: () => buildValue() }, optionList(BULK_FIELDS));
+  const valueBox = h('span', { class: 'row' });
+  let value;
+  function buildValue() {
+    clear(valueBox);
+    const kind = fieldSel.value;
+    if (kind === 'status') value = h('select', { 'aria-label': 'New status' }, optionList(state.meta.statuses.map((x) => [x, STATUS_LABEL[x]])));
+    else if (kind === 'priority') value = h('select', { 'aria-label': 'New priority' }, optionList(state.meta.priorities.map((x) => [x, PRIORITY_LABEL[x]])));
+    else if (kind === 'assignee') value = h('select', { 'aria-label': 'New assignee' }, optionList(userPairs(project.members, 'Unassigned')));
+    else if (kind === 'milestone') value = h('select', { 'aria-label': 'New milestone' }, optionList([['', 'No milestone'], ...milestones.map((m) => [String(m.id), m.name])]));
+    else if (kind === 'due_date') value = h('input', { type: 'date', 'aria-label': 'New due date', title: 'Leave empty to clear the due date' });
+    else value = h('input', { type: 'text', placeholder: 'label, label\u2026', 'aria-label': kind === 'add_labels' ? 'Labels to add' : 'Labels to remove', maxlength: 200 });
+    put(valueBox, value, kind === 'due_date' ? h('span', { class: 'small muted', text: 'empty clears it' }) : null);
+  }
+  function changes() {
+    const kind = fieldSel.value, v = value.value.trim();
+    if (kind === 'assignee') return { assignee: v === '' ? null : v };
+    if (kind === 'milestone') return { milestone: v === '' ? null : Number(v) };
+    if (kind === 'due_date') return { due_date: v === '' ? null : v };
+    if (kind === 'add_labels' || kind === 'remove_labels') {
+      const labels = v.split(/[,\s]+/).filter(Boolean);
+      if (!labels.length) throw new Error('Type at least one label');
+      return { [kind]: labels };
+    }
+    return { [kind]: v };
+  }
+  const apply = h('button', { class: 'btn primary small', onclick: () => guarded(apply, async () => {
+    const body = { tasks: [...selected], changes: changes() };
+    const res = await api('/tasks/bulk', { method: 'POST', body });
+    selected.clear();
+    toast(`${plural(res.updated, 'task')} updated${res.unchanged ? `, ${res.unchanged} already up to date` : ''}${res.failed ? `, ${res.failed} refused` : ''}`, res.failed ? 'error' : 'ok');
+    if (res.failed) bulkReport(res);
+    await onDone();
+  }) }, 'Apply');
+  const el = h('div', { class: 'bulk-bar hidden', role: 'region', 'aria-label': 'Bulk actions' }, count, h('span', { class: 'small muted', text: 'Change' }), fieldSel, valueBox, apply,
+    h('button', { class: 'btn ghost small', onclick: () => { selected.clear(); for (const box of $$('input.row-check, input.select-all', el.parentNode)) { box.checked = false; box.indeterminate = false; } update(); } }, 'Clear selection'));
+  function update() {
+    el.classList.toggle('hidden', selected.size === 0);
+    count.textContent = `${selected.size} selected`;
+  }
+  buildValue();
+  return { el, update };
+}
+// Tasks the server refused are listed with the reason, so nothing fails silently.
+function bulkReport(res) {
+  const rows = res.results.filter((r) => r.result === 'failed');
+  const m = openModal({ title: `${plural(rows.length, 'task')} could not be changed`, narrow: true,
+    content: h('div', { class: 'stack' }, h('p', { class: 'small muted', text: 'The other tasks were saved.' }),
+      rows.map((r) => h('div', { class: 'item' }, h('strong', { class: 'nowrap', text: r.key }), h('span', { class: 'grow small', text: new ApiError(409, r.error).message })))),
+    footer: [h('button', { class: 'btn primary', onclick: () => m.close() }, 'OK')] });
 }
 async function downloadCsv(key) {
   try {
@@ -863,13 +1041,25 @@ function criticalPathCard(cp) {
 function describeActivity(a) {
   const d = a.details || {};
   const t = a.task || '';
-  const change = (c) => Object.entries(c || {}).map(([f, [o, n]]) => `${f.replace('_', ' ')}: ${Array.isArray(o) ? o.join(', ') || 'none' : o ?? 'none'} \u2192 ${Array.isArray(n) ? n.join(', ') || 'none' : n ?? 'none'}`).join('; ');
+  const name = (f) => (f.startsWith('custom_fields.') ? fieldLabel(f.slice('custom_fields.'.length)) : f.replace('_', ' '));
+  const change = (c) => Object.entries(c || {}).map(([f, [o, n]]) => `${name(f)}: ${Array.isArray(o) ? o.join(', ') || 'none' : o ?? 'none'} \u2192 ${Array.isArray(n) ? n.join(', ') || 'none' : n ?? 'none'}`).join('; ');
   switch (a.action) {
     case 'task.created': return `created ${t} \u201c${d.title}\u201d`;
     case 'task.updated': return `updated ${t} (${change(d.changes)})`;
     case 'task.status_changed': return `moved ${t}: ${change(d.changes)}`;
     case 'task.deleted': return `deleted ${t} \u201c${d.title}\u201d`;
-    case 'task.dependency_added': return `made ${d.blocker} block ${d.blocked}`;
+    case 'task.dependency_added': return `made ${d.blocker} block ${d.blocked}${d.type && d.type !== 'finish_to_start' ? ` (${DEP_TYPE_LABEL[d.type]})` : ''}${d.lag_days ? ` with ${lagText(d.lag_days)}` : ''}`;
+    case 'task.dependency_updated': return `changed the dependency of ${d.blocker} on ${d.blocked}: ${Object.entries(d.changes || {}).map(([f, [o, n]]) => (f === 'type' ? `${DEP_TYPE_LABEL[o]} \u2192 ${DEP_TYPE_LABEL[n]}` : `lag ${o} \u2192 ${n} days`)).join('; ')}`;
+    case 'task.link_added': return `linked ${t} ${LINK_LABEL[d.type] || d.type} ${d.other}`;
+    case 'task.link_removed': return `removed the link between ${t} and ${d.other}`;
+    case 'checklist.added': return `added \u201c${d.text}\u201d to the checklist of ${t}`;
+    case 'checklist.checked': return `ticked \u201c${d.text}\u201d on ${t}`;
+    case 'checklist.unchecked': return `unticked \u201c${d.text}\u201d on ${t}`;
+    case 'checklist.edited': return `changed the checklist item \u201c${d.text}\u201d on ${t} to \u201c${d.new_text}\u201d`;
+    case 'checklist.moved': return `moved \u201c${d.text}\u201d to position ${d.position} on the checklist of ${t}`;
+    case 'checklist.removed': return `removed \u201c${d.text}\u201d from the checklist of ${t}`;
+    case 'watcher.added': return d.self ? `started watching ${t}` : `added ${d.user} as a watcher of ${t}`;
+    case 'watcher.removed': return d.self ? `stopped watching ${t}` : `removed ${d.user} from the watchers of ${t}`;
     case 'task.dependency_removed': return `removed the dependency between ${t} and ${d.other}`;
     case 'comment.added': return `commented on ${t}${d.mentions && d.mentions.length ? ' (mentioned ' + d.mentions.join(', ') + ')' : ''}`;
     case 'comment.edited': return `edited a comment on ${t}`;
@@ -881,6 +1071,9 @@ function describeActivity(a) {
     case 'milestone.deleted': return `deleted milestone \u201c${d.name}\u201d`;
     case 'project.created': return `created the project`;
     case 'project.updated': return `updated the project (${change(d.changes)})`;
+    case 'project_field.created': return `defined the ${FIELD_TYPE_LABEL[d.type] || ''} project field \u201c${d.label}\u201d`;
+    case 'project_field.updated': return `changed the project field \u201c${fieldLabel(d.key)}\u201d (${change(d.changes)})`;
+    case 'project_field.deleted': return `deleted the project field \u201c${d.label}\u201d (removed ${plural(d.values_removed, 'value')})`;
     case 'project.member_added': return `added ${d.user} to the project`;
     case 'project.member_removed': return `removed ${d.user} from the project`;
     case 'import.completed': return `imported tasks from CSV: ${d.created} created, ${d.skipped_duplicates} skipped, ${d.errors} errors`;
@@ -915,8 +1108,13 @@ async function settingsTab(root, ctx) {
     owner: h('select', { value: project.owner ? project.owner.username : '', disabled: !manage }, optionList(userPairs(project.members, '\u2014'))),
     description: h('textarea', { maxlength: 5000, value: project.description, disabled: !manage }),
   };
+  const cf = state.fields.length ? customFieldsEditor(project.custom_fields, { creating: false, disabled: !manage }) : null;
   const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => {
-    await api('/projects/' + key, { method: 'PATCH', body: { name: inputs.name.value, status: inputs.status.value, start_date: inputs.start_date.value || null, due_date: inputs.due_date.value || null, owner: inputs.owner.value || null, description: inputs.description.value } });
+    if (cf && !controlsValid(cf.controls)) return;
+    const body = { name: inputs.name.value, status: inputs.status.value, start_date: inputs.start_date.value || null, due_date: inputs.due_date.value || null, owner: inputs.owner.value || null, description: inputs.description.value };
+    const changed = cf ? collectCustom(cf.controls, project.custom_fields) : {};
+    if (Object.keys(changed).length) body.custom_fields = changed;
+    await api('/projects/' + key, { method: 'PATCH', body });
     toast('Project saved', 'ok'); await refreshProjects(); route();
   }) }, 'Save changes');
   const memberList = h('div');
@@ -930,7 +1128,10 @@ async function settingsTab(root, ctx) {
   renderMembers();
   put(root, h('div', { class: 'grid two' },
     h('div', { class: 'card stack' }, h('h2', { text: 'Project details' }), h('div', { class: 'form-grid' }, field('Name', inputs.name), field('Status', inputs.status), field('Start date', inputs.start_date), field('Due date', inputs.due_date), field('Owner', inputs.owner)),
-      field('Description', inputs.description), manage ? h('div', {}, save) : h('p', { class: 'small muted', text: 'Only managers and admins can edit project details.' })),
+      field('Description', inputs.description),
+      cf ? h('div', { class: 'stack' }, h('div', { class: 'cf-heading', text: 'Custom fields' }), cf.node)
+        : hasRole('admin') ? h('p', { class: 'small muted' }, 'No custom fields yet. ', h('a', { href: '#/fields', text: 'Define some' }), ' to track extra details such as a client, a budget or a wiki link.') : null,
+      manage ? h('div', {}, save) : h('p', { class: 'small muted', text: 'Only managers and admins can edit project details.' })),
     h('div', { class: 'card' }, h('h2', { text: 'Members' }), h('p', { class: 'small muted', text: 'Members can be assigned work and can edit tasks in this project.' }), memberList,
       manage ? h('div', { class: 'row', style: { marginTop: '10px' } }, addSel, h('button', { class: 'btn', onclick: (e) => guarded(e.target, async () => { if (!addSel.value) return; Object.assign(project, await api(`/projects/${key}/members`, { method: 'POST', body: { username: addSel.value } })); route(); }) }, 'Add')) : null)),
     manage ? importCard(key) : null,
@@ -994,15 +1195,21 @@ function openCreateProject() {
     status: h('select', { value: 'active' }, optionList(state.meta.project_statuses.filter((s) => s !== 'archived').map((s) => [s, PROJECT_STATUS_LABEL[s]]))),
     start_date: h('input', { type: 'date' }), due_date: h('input', { type: 'date' }), description: h('textarea', {}),
   };
+  const cf = state.fields.length ? customFieldsEditor(null, { creating: true }) : null;
   const checks = state.users.filter((u) => u.username !== state.me.username).map((u) => [u, h('input', { type: 'checkbox' })]);
   const create = h('button', { class: 'btn primary', onclick: () => guarded(create, async () => {
+    if (cf && !controlsValid(cf.controls)) return;
     const body = { key: f.key.value, name: f.name.value, status: f.status.value, description: f.description.value, members: checks.filter(([, c]) => c.checked).map(([u]) => u.username) };
     for (const k of ['start_date', 'due_date']) if (f[k].value) body[k] = f[k].value;
+    const custom = cf ? collectCustom(cf.controls, null) : {};
+    if (Object.keys(custom).length) body.custom_fields = custom;
     const p = await api('/projects', { method: 'POST', body });
     m.close(); await refreshProjects(); location.hash = '#/p/' + p.key; toast(`Project ${p.key} created`, 'ok');
   }) }, 'Create project');
   const m = openModal({ title: 'New project', content: h('div', { class: 'stack' }, h('div', { class: 'form-grid' }, field('Key', f.key, '2\u201310 letters or digits; prefixes task keys'), field('Name', f.name), field('Status', f.status), field('Start date', f.start_date), field('Due date', f.due_date)),
-    field('Description', f.description), h('div', {}, h('div', { class: 'small muted', text: 'Members (you are added automatically)' }), h('div', { class: 'row wrap' }, checks.map(([u, c]) => h('label', { class: 'row small' }, c, u.display_name))))),
+    field('Description', f.description),
+    cf ? h('div', { class: 'stack' }, h('div', { class: 'cf-heading', text: 'Custom fields' }), cf.node) : null,
+    h('div', {}, h('div', { class: 'small muted', text: 'Members (you are added automatically)' }), h('div', { class: 'row wrap' }, checks.map(([u, c]) => h('label', { class: 'row small' }, c, u.display_name))))),
     footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), create] });
 }
 
@@ -1017,7 +1224,7 @@ async function openTask(key) {
   const editable = canWrite(project);
   let dirty = false, comments = [], time = [], acts = [];
   // Typed-but-unsent text survives the re-render that follows every saved field change.
-  const drafts = { description: null, comment: '', subtask: '', depKey: '', depDir: 'blocked_by', hours: '', day: state.today, note: '' };
+  const drafts = { description: null, comment: '', subtask: '', depKey: '', depDir: 'blocked_by', depType: 'finish_to_start', depLag: '', linkKey: '', linkType: 'relates_to', checkText: '', watcher: '', hours: '', day: state.today, note: '' };
   const track = (name) => (e) => { drafts[name] = e.target.value; };
   const body = h('div');
   const handle = openModal({ title: null, content: body, onClose: () => { if (dirty) route(); } });
@@ -1059,6 +1266,7 @@ async function openTask(key) {
       field('Labels', h('input', { type: 'text', value: task.labels.join(', '), disabled: !editable, placeholder: 'comma separated', onchange: (e) => patch({ labels: e.target.value.split(/[,\s]+/).filter(Boolean) }) })),
       h('div', { class: 'small muted' }, h('div', { text: `Reporter: ${task.reporter ? task.reporter.display_name : '\u2014'}` }), h('div', { text: `Created ${fmtAgo(task.created_at)}` }), h('div', { text: `Updated ${fmtAgo(task.updated_at)}` }), task.completed_at ? h('div', { text: `Closed ${fmtAgo(task.completed_at)}` }) : null,
         task.external_ref ? h('div', { text: `Imported from ${task.external_ref}` }) : null, task.parent ? h('div', {}, 'Subtask of ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); switchTo(task.parent); } }, task.parent)) : null),
+      watchersBox(),
       hasRole('manager') && project.status !== 'archived' ? h('button', { class: 'btn danger small', onclick: act(deleteTask) }, 'Delete task') : null);
 
     put(body,
@@ -1066,7 +1274,7 @@ async function openTask(key) {
         task.blocked_by_open ? badge('blocked', `Waiting on ${task.blocked_by_open}`) : null, h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', 'aria-label': 'Close', onclick: () => handle.close() }, '\u2715')),
       project.status === 'archived' ? h('p', { class: 'small muted', text: 'This project is archived, so its tasks are read-only.' }) : !editable ? h('p', { class: 'small muted', text: 'You have read-only access to this task.' }) : null,
       h('div', { class: 'task-layout' }, h('div', {}, title, h('div', { class: 'stack', style: { marginTop: '8px' } }, desc, saveDesc),
-        subtasksSection(), dependenciesSection(), timeSection(), commentsSection(), activitySection()), side));
+        checklistSection(), subtasksSection(), dependenciesSection(), linksSection(), timeSection(), commentsSection(), activitySection()), side));
   }
 
   async function switchTo(otherKey) { handle.close(); openTask(otherKey); }
@@ -1087,15 +1295,115 @@ async function openTask(key) {
       task.subtask_list.map((s) => h('div', { class: 'item' }, statusBadge(s.status), h('a', { href: '#', class: 'grow', onclick: (e) => { e.preventDefault(); switchTo(s.key); } }, h('strong', { text: s.key }), ' ', s.title), h('span', { class: 'small muted', text: s.assignee || '' }))),
       editable ? h('div', { class: 'row', style: { marginTop: '6px' } }, input, add) : null);
   }
+  function depLabel(d) {
+    const lag = lagText(d.lag_days);
+    return `${DEP_TYPE_SHORT[d.type]}${lag ? ' \u00b7 ' + lag : ''}`;
+  }
   function dependenciesSection() {
     const input = h('input', { type: 'text', placeholder: 'Task key, e.g. ' + task.project + '-1', 'aria-label': 'Related task key', value: drafts.depKey, oninput: track('depKey') });
     const dir = h('select', { 'aria-label': 'Relationship', value: drafts.depDir, onchange: track('depDir') }, optionList([['blocked_by', 'is blocked by'], ['blocks', 'blocks']]));
-    const add = h('button', { class: 'btn small', onclick: act(async () => { if (!input.value.trim()) return; await api(`/tasks/${key}/dependencies`, { method: 'POST', body: { [dir.value]: input.value.trim().toUpperCase() } }); drafts.depKey = ''; await reload(); }) }, 'Link');
-    const rows = (list, label) => list.map((d) => h('div', { class: 'item' }, h('span', { class: 'small muted nowrap', text: label }), statusBadge(d.status), h('a', { href: '#', class: 'grow', onclick: (e) => { e.preventDefault(); switchTo(d.key); } }, h('strong', { text: d.key }), ' ', d.title),
-      editable ? h('button', { class: 'btn ghost small', 'aria-label': `Remove link to ${d.key}`, onclick: act(async () => { await api(`/tasks/${key}/dependencies/${d.key}`, { method: 'DELETE' }); await reload(); }) }, '\u2715') : null));
-    return h('div', { class: 'section' }, h('h3', { text: 'Dependencies' }), rows(task.blocked_by, 'blocked by'), rows(task.blocks, 'blocks'),
+    const type = h('select', { 'aria-label': 'Dependency type', title: DEP_TYPE_HELP[drafts.depType], value: drafts.depType, onchange: (e) => { drafts.depType = e.target.value; e.target.title = DEP_TYPE_HELP[drafts.depType]; } },
+      optionList(state.meta.dependency_types.map((t) => [t, DEP_TYPE_LABEL[t]])));
+    const lag = h('input', { type: 'number', step: 1, min: -state.meta.max_lag_days, max: state.meta.max_lag_days, placeholder: 'lag (days)', 'aria-label': 'Lag in days (negative for lead)', title: 'Days to wait after the blocker (negative: may overlap by that many days)', style: { width: '110px' }, value: drafts.depLag, oninput: track('depLag') });
+    const add = h('button', { class: 'btn small', onclick: act(async () => {
+      if (!input.value.trim()) return;
+      const body = { [dir.value]: input.value.trim().toUpperCase(), type: type.value };
+      if (lag.value !== '') body.lag_days = Number(lag.value);
+      await api(`/tasks/${key}/dependencies`, { method: 'POST', body });
+      drafts.depKey = ''; drafts.depLag = ''; await reload();
+    }) }, 'Link');
+    const rows = (list, label, mine) => list.map((d) => {
+      const conflict = d.schedule && d.schedule.conflict;
+      const when = d.schedule ? `${d.schedule.applies_to === 'start' ? 'start' : 'finish'} no earlier than ${fmtDate(d.schedule.not_before)}` : '';
+      return h('div', { class: 'item' }, h('span', { class: 'small muted nowrap', text: label }),
+        h('span', { class: 'chip nowrap', title: `${DEP_TYPE_LABEL[d.type]}. ${DEP_TYPE_HELP[d.type]}`, text: depLabel(d) }),
+        statusBadge(d.status), h('a', { href: '#', class: 'grow', onclick: (e) => { e.preventDefault(); switchTo(d.key); } }, h('strong', { text: d.key }), ' ', d.title),
+        conflict ? h('span', { class: 'badge overdue', title: `${mine ? 'This task is' : d.key + ' is'} planned before the dependency allows: should ${when}`, text: '\u26A0 dates' }) : null,
+        editable ? h('button', { class: 'btn ghost small', 'aria-label': `Edit dependency on ${d.key}`, onclick: () => editDependency(d) }, 'Edit') : null,
+        editable ? h('button', { class: 'btn ghost small', 'aria-label': `Remove link to ${d.key}`, onclick: act(async () => { await api(`/tasks/${key}/dependencies/${d.key}`, { method: 'DELETE' }); await reload(); }) }, '\u2715') : null);
+    });
+    return h('div', { class: 'section' }, h('h3', { text: 'Dependencies' }), rows(task.blocked_by, 'blocked by', true), rows(task.blocks, 'blocks', false),
       !task.blocked_by.length && !task.blocks.length ? h('div', { class: 'small muted', text: 'No dependencies.' }) : null,
-      editable ? h('div', { class: 'row', style: { marginTop: '6px' } }, dir, input, add) : null);
+      editable ? h('div', { class: 'form-row', style: { marginTop: '6px' } }, dir, input, type, lag, add) : null);
+  }
+  function editDependency(d) {
+    const type = h('select', { 'aria-label': 'Dependency type', value: d.type }, optionList(state.meta.dependency_types.map((t) => [t, DEP_TYPE_LABEL[t]])));
+    const lag = h('input', { type: 'number', step: 1, min: -state.meta.max_lag_days, max: state.meta.max_lag_days, value: d.lag_days, 'aria-label': 'Lag in days' });
+    const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => {
+      await api(`/tasks/${key}/dependencies/${d.key}`, { method: 'PATCH', body: { type: type.value, lag_days: lag.value === '' ? 0 : Number(lag.value) } });
+      m.close(); await reload();
+    }) }, 'Save');
+    const m = openModal({ title: `Dependency on ${d.key}`, narrow: true, content: h('div', { class: 'stack' },
+      field('Type', type, 'Finish \u2192 Start is the usual one: the blocked task waits for the blocker to finish.'),
+      field('Lag (days)', lag, 'Positive: wait this many days after. Negative: may overlap by that many days. Dates are only checked, never moved.')),
+      footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
+  }
+  function linksSection() {
+    const input = h('input', { type: 'text', placeholder: 'Task key, e.g. ' + task.project + '-2', 'aria-label': 'Task to link', value: drafts.linkKey, oninput: track('linkKey') });
+    const type = h('select', { 'aria-label': 'Link type', value: drafts.linkType, onchange: track('linkType') }, optionList(state.meta.link_types.map((t) => [t, LINK_LABEL[t]])));
+    const add = h('button', { class: 'btn small', onclick: act(async () => {
+      if (!input.value.trim()) return;
+      await api(`/tasks/${key}/links`, { method: 'POST', body: { type: type.value, task: input.value.trim().toUpperCase() } });
+      drafts.linkKey = ''; await reload();
+    }) }, 'Add relation');
+    return h('div', { class: 'section' }, h('h3', { text: 'Related tasks' }),
+      task.links.map((l) => h('div', { class: 'item' }, h('span', { class: 'small muted nowrap', text: LINK_LABEL[l.type] }), statusBadge(l.task.status),
+        h('a', { href: '#', class: 'grow', onclick: (e) => { e.preventDefault(); switchTo(l.task.key); } }, h('strong', { text: l.task.key }), ' ', l.task.title),
+        editable ? h('button', { class: 'btn ghost small', 'aria-label': `Remove relation to ${l.task.key}`, onclick: act(async () => { await api(`/tasks/${key}/links/${l.task.key}`, { method: 'DELETE' }); await reload(); }) }, '\u2715') : null)),
+      !task.links.length ? h('div', { class: 'small muted', text: 'Nothing related. These links are for reference only; they never block work.' }) : null,
+      editable ? h('div', { class: 'form-row', style: { marginTop: '6px' } }, type, input, add) : null);
+  }
+  function checklistSection() {
+    const items = task.checklist_items;
+    const done = items.filter((i) => i.done).length;
+    const input = h('input', { type: 'text', placeholder: 'Add a checklist item\u2026', maxlength: state.meta.max_checklist_text, 'aria-label': 'New checklist item', value: drafts.checkText, oninput: track('checkText'),
+      onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); add.click(); } } });
+    const add = h('button', { class: 'btn small', onclick: act(async () => {
+      if (!input.value.trim()) return;
+      await api(`/tasks/${key}/checklist`, { method: 'POST', body: { text: input.value.trim() } });
+      drafts.checkText = ''; await reload();
+      const next = $('input[aria-label="New checklist item"]', body); // ready for the next item
+      if (next) next.focus();
+    }) }, 'Add');
+    const row = (i, index) => h('div', { class: 'item check-item' + (i.done ? ' done' : '') },
+      h('input', { type: 'checkbox', checked: i.done, disabled: !editable, 'aria-label': i.text, title: i.done && i.done_by ? `Done by ${i.done_by.display_name} ${fmtAgo(i.done_at)}` : null, onchange: async (e) => {
+        const box = e.currentTarget;
+        box.disabled = true;
+        try { await api('/checklist/' + i.id, { method: 'PATCH', body: { done: box.checked } }); await reload(); } catch (err) { toast(err.message, 'error'); box.checked = !box.checked; box.disabled = false; }
+      } }),
+      h('span', { class: 'grow check-text', text: i.text }),
+      editable ? h('span', { class: 'row', style: { gap: '2px' } },
+        h('button', { class: 'btn ghost small', 'aria-label': `Move ${i.text} up`, disabled: index === 0, onclick: act(async () => { await api('/checklist/' + i.id, { method: 'PATCH', body: { position: index } }); await reload(); }) }, '\u25B2'),
+        h('button', { class: 'btn ghost small', 'aria-label': `Move ${i.text} down`, disabled: index === items.length - 1, onclick: act(async () => { await api('/checklist/' + i.id, { method: 'PATCH', body: { position: index + 2 } }); await reload(); }) }, '\u25BC'),
+        h('button', { class: 'btn ghost small', 'aria-label': `Edit ${i.text}`, onclick: () => editChecklistItem(i) }, 'Edit'),
+        h('button', { class: 'btn ghost small', 'aria-label': `Delete ${i.text}`, onclick: act(async () => { await api('/checklist/' + i.id, { method: 'DELETE' }); await reload(); }) }, '\u2715')) : null);
+    return h('div', { class: 'section' }, h('h3', { text: `Checklist${items.length ? ` (${done}/${items.length})` : ''}` }),
+      items.length ? h('div', { class: 'row', style: { marginBottom: '4px' } }, progressBar((100 * done) / items.length, done === items.length ? 'ok' : '')) : null,
+      items.map(row),
+      !items.length && !editable ? h('div', { class: 'small muted', text: 'No checklist items.' }) : null,
+      editable ? h('div', { class: 'row', style: { marginTop: '6px' } }, input, add) : null);
+  }
+  function editChecklistItem(i) {
+    const area = h('input', { type: 'text', value: i.text, maxlength: state.meta.max_checklist_text, 'aria-label': 'Checklist item text' });
+    const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => { await api('/checklist/' + i.id, { method: 'PATCH', body: { text: area.value } }); m.close(); await reload(); }) }, 'Save');
+    const m = openModal({ title: 'Edit checklist item', narrow: true, content: area, footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
+  }
+  function watchersBox() {
+    const mine = task.watching;
+    const others = state.users.filter((u) => !task.watchers.some((w) => w.username === u.username));
+    const toggle = h('button', { class: 'btn small' + (mine ? '' : ' primary'), 'aria-pressed': String(mine), disabled: !mine && project.status === 'archived',
+      onclick: act(async () => {
+        if (mine) await api(`/tasks/${key}/watchers/${state.me.username}`, { method: 'DELETE' });
+        else await api(`/tasks/${key}/watchers`, { method: 'POST', body: {} });
+        await reload();
+      }) }, mine ? 'Stop watching' : 'Watch');
+    const picker = h('select', { 'aria-label': 'Add a watcher', value: drafts.watcher, onchange: track('watcher') }, optionList([['', 'Add someone\u2026'], ...userPairs(others)]));
+    const addOther = h('button', { class: 'btn small', onclick: act(async () => { if (!picker.value) return; await api(`/tasks/${key}/watchers`, { method: 'POST', body: { username: picker.value } }); drafts.watcher = ''; await reload(); }) }, 'Add');
+    return h('div', { class: 'watch-box' }, h('div', { class: 'row' }, h('strong', { class: 'small', text: `Watchers (${task.watchers.length})` }), h('span', { class: 'spacer' }), toggle),
+      task.watchers.length ? task.watchers.map((w) => h('div', { class: 'row small' }, avatar(w), h('span', { class: 'grow ellipsis', text: w.display_name }),
+        editable || w.username === state.me.username ? h('button', { class: 'btn ghost small', 'aria-label': `Remove ${w.display_name} from watchers`, onclick: act(async () => { await api(`/tasks/${key}/watchers/${w.username}`, { method: 'DELETE' }); await reload(); }) }, '\u2715') : null))
+        : h('div', { class: 'small muted', text: 'Nobody is following this task.' }),
+      editable ? h('div', { class: 'row' }, picker, addOther) : null);
   }
   function timeSection() {
     const hours = h('input', { type: 'number', min: 0.25, max: 24, step: '0.25', placeholder: 'hours', 'aria-label': 'Hours', style: { width: '100px' }, value: drafts.hours, oninput: track('hours') });
@@ -1160,6 +1468,91 @@ function openCreateUser() {
     m.close(); state.users = (await api('/users')).items; showToken(r.user.username, r.token); route();
   }) }, 'Create user');
   const m = openModal({ title: 'New user', narrow: true, content: h('div', { class: 'stack' }, field('Username', f.username), field('Display name', f.display_name), field('E-mail (optional)', f.email), h('div', { class: 'form-grid' }, field('Role', f.role), field('Weekly capacity (h)', f.weekly_capacity_hours))), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), create] });
+}
+
+/* ============================== admin: project fields ============================== */
+async function fieldsView(view, alive) {
+  const data = await api('/project-fields');
+  if (!alive()) return;
+  state.fields = data.items;
+  clear(view);
+  const full = data.items.length >= state.meta.project_field_limits.max_fields;
+  view.append(h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('h1', { text: 'Project fields' }),
+    h('p', { class: 'muted', text: 'Extra details every project can carry, such as a client, a budget or a wiki link. Managers fill them in on the project\u2019s Settings tab.' })),
+    h('button', { class: 'btn primary', disabled: full, title: full ? `At most ${state.meta.project_field_limits.max_fields} fields` : null, onclick: () => openFieldDialog(null) }, '+ New field')),
+    data.items.length
+      ? h('div', { class: 'card flush' }, h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['Field', 'Key', 'Type', 'Rules', 'Required', ''].map((x) => h('th', { text: x })))),
+        h('tbody', {}, data.items.map((f) => h('tr', {},
+          h('td', {}, h('strong', { text: f.label }), f.description ? h('div', { class: 'small muted', text: f.description }) : null),
+          h('td', {}, h('code', { text: f.key })), h('td', {}, h('span', { class: 'chip', text: FIELD_TYPE_LABEL[f.type] })), h('td', { class: 'small', text: fieldRules(f) }),
+          h('td', {}, f.required ? badge('active', 'Required') : h('span', { class: 'muted', text: '\u2014' })),
+          h('td', { class: 'right nowrap' }, h('button', { class: 'btn small', onclick: () => openFieldDialog(f) }, 'Edit'), ' ', h('button', { class: 'btn small danger', onclick: () => deleteFieldDialog(f) }, 'Delete')))))))
+      : h('div', { class: 'card empty' }, h('h2', { text: 'No project fields yet' }), h('p', { text: 'Add a text, number or URL field and it appears on every project.' })));
+}
+async function fieldsChanged(message) {
+  state.fields = (await api('/project-fields')).items;
+  state.projectCache = {};
+  toast(message, 'ok');
+  route();
+}
+const slugify = (text) => text.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '_').replace(/^[^a-z]+/, '').replace(/_+$/, '').slice(0, 40);
+
+function openFieldDialog(def) {
+  const editing = !!def;
+  const limits = state.meta.project_field_limits;
+  const f = {
+    label: h('input', { type: 'text', maxlength: 50, required: true, value: editing ? def.label : '', placeholder: 'e.g. Client' }),
+    key: h('input', { type: 'text', maxlength: 40, required: true, disabled: editing, value: editing ? def.key : '', pattern: '[a-z][a-z0-9_]{1,39}', title: 'Lower-case letters, digits and underscores, starting with a letter' }),
+    type: h('select', { value: editing ? def.type : 'text', disabled: editing }, optionList(state.meta.project_field_types.map((t) => [t, FIELD_TYPE_LABEL[t]]))),
+    description: h('input', { type: 'text', maxlength: 200, value: editing ? def.description : '', placeholder: 'Help text shown under the input' }),
+    required: h('input', { type: 'checkbox', checked: editing && def.required }),
+    max_length: h('input', { type: 'number', min: 1, max: limits.max_text_length, step: 1, value: editing && def.max_length !== null ? def.max_length : limits.default_max_length }),
+    decimals: h('select', { value: String(editing && def.decimals !== null ? def.decimals : limits.default_decimals) }, optionList(Array.from({ length: limits.max_decimals + 1 }, (_, n) => [String(n), String(n)]))),
+    min_value: h('input', { type: 'number', step: 'any', value: editing && def.min_value !== null ? def.min_value : '' }),
+    max_value: h('input', { type: 'number', step: 'any', value: editing && def.max_value !== null ? def.max_value : '' }),
+  };
+  let keyEdited = false;
+  f.key.addEventListener('input', () => { keyEdited = true; });
+  f.label.addEventListener('input', () => { if (!editing && !keyEdited) f.key.value = slugify(f.label.value); });
+  const panels = {
+    text: h('div', { class: 'form-grid' }, field('Maximum length', f.max_length, `1\u2013${limits.max_text_length} characters`)),
+    number: h('div', { class: 'form-grid' }, field('Decimal places', f.decimals), field('Minimum (optional)', f.min_value), field('Maximum (optional)', f.max_value)),
+    url: h('p', { class: 'small muted', text: 'Only http:// and https:// addresses are accepted. They open in a new tab.' }),
+  };
+  const sync = () => { for (const [type, panel] of Object.entries(panels)) panel.classList.toggle('hidden', type !== f.type.value); };
+  f.type.addEventListener('change', sync);
+  sync();
+
+  const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => {
+    const type = f.type.value;
+    const check = [f.label, f.key, ...(type === 'text' ? [f.max_length] : []), ...(type === 'number' ? [f.min_value, f.max_value] : [])];
+    if (!check.every((el) => el.disabled || el.reportValidity())) return;
+    const body = { label: f.label.value.trim(), description: f.description.value.trim(), required: f.required.checked };
+    if (!editing) Object.assign(body, { key: f.key.value, type });
+    if (type === 'text') body.max_length = Number(f.max_length.value);
+    if (type === 'number') {
+      Object.assign(body, { decimals: Number(f.decimals.value), min_value: f.min_value.value === '' ? null : Number(f.min_value.value), max_value: f.max_value.value === '' ? null : Number(f.max_value.value) });
+      if (body.min_value !== null && body.max_value !== null && body.min_value > body.max_value) { toast('The minimum cannot be greater than the maximum', 'error'); return; }
+    }
+    await api(editing ? '/project-fields/' + def.key : '/project-fields', { method: editing ? 'PATCH' : 'POST', body });
+    m.close();
+    await fieldsChanged(editing ? 'Field saved' : 'Field created');
+  }) }, editing ? 'Save changes' : 'Create field');
+  const m = openModal({ title: editing ? `Edit \u201c${def.label}\u201d` : 'New project field', content: h('div', { class: 'stack' },
+    h('div', { class: 'form-grid' }, field('Label', f.label), field('Key', f.key, editing ? 'Cannot be changed' : 'Used by the API; letters, digits, underscores'), field('Type', f.type, editing ? 'Cannot be changed' : null)),
+    panels.text, panels.number, panels.url, field('Description (optional)', f.description),
+    h('label', { class: 'row small' }, f.required, 'Required when creating a project (existing projects are not affected)')), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
+}
+function deleteFieldDialog(def) {
+  const input = h('input', { type: 'text', placeholder: def.key, 'aria-label': 'Type the field key to confirm', autocomplete: 'off' });
+  const go = h('button', { class: 'btn danger', disabled: true, onclick: () => guarded(go, async () => {
+    await api('/project-fields/' + def.key, { method: 'DELETE', query: { confirm: def.key } });
+    m.close();
+    await fieldsChanged('Field deleted');
+  }) }, 'Delete forever');
+  input.addEventListener('input', () => { go.disabled = input.value !== def.key; });
+  const m = openModal({ title: `Delete \u201c${def.label}\u201d?`, narrow: true, content: h('div', { class: 'stack' },
+    h('p', { text: `This removes the field and its value from every project. It cannot be undone. Type ${def.key} to confirm.` }), input), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), go] });
 }
 
 /* ============================== boot ============================== */

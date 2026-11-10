@@ -1,35 +1,59 @@
 """Dependency + hierarchy graph helpers.
 
-Two kinds of ordering constraint exist inside a project:
+Ordering constraints inside a project come from two places:
 
-* a dependency ``blocker -> blocked`` (finish-to-start), and
+* a dependency ``blocker -> blocked`` of one of three types (finish-to-start, start-to-start, finish-to-finish), and
 * a hierarchy edge ``child -> parent`` (a parent cannot finish before its subtasks).
 
-A *deadlock* is a cycle in the union of both. Checking the union (rather than each
-kind separately) catches longer loops such as ``parent -> X -> child -> parent``.
+A *deadlock* is a cycle in the combined graph. Because the dependency types talk about different moments of a task,
+the graph is built over *events* rather than tasks: every task has a ``start`` event and a ``finish`` event, and
+
+* ``start -> finish`` for the same task (work has to begin before it can end),
+* finish-to-start:  ``finish(blocker) -> start(blocked)``,
+* start-to-start:   ``start(blocker)  -> start(blocked)``,
+* finish-to-finish: ``finish(blocker) -> finish(blocked)``,
+* hierarchy:        ``finish(child)   -> finish(parent)``.
+
+A cycle in that graph means something would have to happen before itself. Working with events (instead of treating every
+link as "u before v") is what keeps legitimate combinations such as "B starts after A starts" together with "A finishes
+after B finishes" from being refused, while still catching loops that run through parent/subtask links.
 """
 
 from __future__ import annotations
 
 from collections import deque
+from datetime import timedelta
 
-from ..domain import OPEN_SQL
+from ..domain import NOT_STARTED_STATUSES, OPEN_STATUSES
+from ..util import parse_date
+
+START, FINISH = 0, 1
+HIERARCHY = "child_of"  # edge kind for subtask -> parent; the other kinds are the dependency types
+
+_EVENTS = {
+    "finish_to_start": (FINISH, START),
+    "start_to_start": (START, START),
+    "finish_to_finish": (FINISH, FINISH),
+    HIERARCHY: (FINISH, FINISH),
+}
 
 
 def dependency_edges(conn, project_id):
+    """Dependencies of a project as ``(blocker_id, blocked_id, type)`` triples."""
     rows = conn.execute(
-        "SELECT d.blocker_id, d.blocked_id FROM task_dependencies d "
+        "SELECT d.blocker_id, d.blocked_id, d.type FROM task_dependencies d "
         "JOIN tasks t ON t.id = d.blocker_id WHERE t.project_id = ?",
         (project_id,),
     )
-    return {(r[0], r[1]) for r in rows}
+    return {(r[0], r[1], r[2]) for r in rows}
 
 
 def hierarchy_edges(conn, project_id):
+    """Subtask links as ``(child_id, parent_id, 'child_of')`` triples."""
     rows = conn.execute(
         "SELECT id, parent_id FROM tasks WHERE project_id = ? AND parent_id IS NOT NULL", (project_id,)
     )
-    return {(r[0], r[1]) for r in rows}
+    return {(r[0], r[1], HIERARCHY) for r in rows}
 
 
 def _path(adj, start, goal):
@@ -50,33 +74,89 @@ def _path(adj, start, goal):
     return None
 
 
-def find_cycle(conn, project_id, add, remove=()):
+def _event_edge(edge):
+    u, v, kind = edge
+    left, right = _EVENTS[kind]
+    return (u, left), (v, right)
+
+
+def find_cycle(conn, project_id, add=(), remove=()):
     """Return task ids forming a cycle if the ``add`` edges were applied, else None.
 
-    Edges are ``(u, v)`` meaning "u must finish before v". ``remove`` edges are
-    treated as already deleted (used when re-parenting a task).
+    Edges are ``(u, v, kind)`` triples where ``kind`` is a dependency type or ``HIERARCHY`` (see the module docstring for what
+    each one means). ``remove`` edges are treated as already deleted - used when re-parenting a task or changing a
+    dependency's type. The result lists the tasks around the loop, starting and ending with the same task.
     """
     edges = dependency_edges(conn, project_id) | hierarchy_edges(conn, project_id)
     edges -= set(remove)
     edges |= set(add)
-    adj = {}
-    for u, v in edges:
-        adj.setdefault(u, []).append(v)
-    for u, v in add:
-        path = _path(adj, v, u)
+    adj, tasks = {}, set()
+    for edge in edges:
+        a, b = _event_edge(edge)
+        adj.setdefault(a, []).append(b)
+        tasks.update((edge[0], edge[1]))
+    for t in tasks:
+        adj.setdefault((t, START), []).append((t, FINISH))
+    for neighbours in adj.values():
+        neighbours.sort()  # deterministic loops in error messages
+    for edge in add:
+        a, b = _event_edge(edge)
+        path = _path(adj, b, a)
         if path is not None:
-            return [u] + path
+            loop = [a] + path
+            ids = [event[0] for event in loop]
+            return [t for i, t in enumerate(ids) if i == 0 or t != ids[i - 1]]
     return None
 
 
-def open_blockers(conn, task_id):
-    return conn.execute(
-        "SELECT b.id, b.number, b.title, b.status, p.key AS project_key "
+def blocking_links(conn, task_id, new_status):
+    """Dependencies that stop ``task_id`` from moving into ``new_status`` right now.
+
+    * To start (in progress / in review) or finish (done): finish-to-start needs the blocker closed, start-to-start needs
+      it started.
+    * To finish (done) only: finish-to-finish needs the blocker closed.
+
+    Closed blockers (done or cancelled) never hold anybody up.
+    """
+    if new_status not in ("in_progress", "in_review", "done"):
+        return []
+    rows = conn.execute(
+        "SELECT b.id, b.number, b.title, b.status, p.key AS project_key, d.type "
         "FROM task_dependencies d JOIN tasks b ON b.id = d.blocker_id "
-        "JOIN projects p ON p.id = b.project_id "
-        "WHERE d.blocked_id = ? AND b.status IN %s ORDER BY b.number" % OPEN_SQL,
+        "JOIN projects p ON p.id = b.project_id WHERE d.blocked_id = ? ORDER BY b.number",
         (task_id,),
     ).fetchall()
+    out = []
+    for r in rows:
+        if r["type"] == "finish_to_start":
+            hold = r["status"] in OPEN_STATUSES
+        elif r["type"] == "start_to_start":
+            hold = r["status"] in NOT_STARTED_STATUSES
+        else:  # finish_to_finish
+            hold = new_status == "done" and r["status"] in OPEN_STATUSES
+        if hold:
+            out.append(r)
+    return out
+
+
+def schedule_hint(dep_type, lag_days, blocker_start, blocker_due, blocked_start, blocked_due):
+    """When the dependency says the blocked task may start / finish, and whether its planned dates already break that.
+
+    Calendar days, not working days; the same day is allowed (a task due on the 10th can hand over on the 10th).
+    ``None`` when the anchoring date on the blocker is not set.
+    """
+    if dep_type == "start_to_start":
+        anchor, applies = blocker_start, "start"
+    elif dep_type == "finish_to_finish":
+        anchor, applies = blocker_due, "finish"
+    else:
+        anchor, applies = blocker_due, "start"
+    anchor_date = parse_date(anchor)
+    if anchor_date is None:
+        return None
+    not_before = (anchor_date + timedelta(days=lag_days or 0)).isoformat()
+    planned = blocked_start if applies == "start" else blocked_due
+    return {"applies_to": applies, "not_before": not_before, "conflict": bool(planned) and planned < not_before}
 
 
 def ancestors(conn, task_id):

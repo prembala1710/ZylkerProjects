@@ -40,12 +40,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .btn.danger { color: var(--bad); border-color: var(--bad); } .btn.small { padding: 2px 8px; font-size: 12px; }
 .btn.ghost { border-color: transparent; background: transparent; } .btn.ghost:hover { background: var(--gray-soft); }
 :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-input[type=text], input[type=password], input[type=date], input[type=number], input[type=search], input[type=email], select, textarea {
+input[type=text], input[type=password], input[type=date], input[type=number], input[type=search], input[type=email], input[type=url], select, textarea {
   width: 100%; padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 textarea { min-height: 90px; resize: vertical; }
 input[type=checkbox] { width: auto; }
 label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
 label.field > * { font-weight: 400; color: var(--text); }
+label.field > .muted { color: var(--muted); }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
 .error-text { color: var(--bad); font-size: 13px; }
 
@@ -202,3 +203,29 @@ svg.chart { width: 100%; height: auto; display: block; } svg.chart text { fill: 
 .tl-ms { fill: var(--warn); } .tl-row:hover rect.hit { fill: var(--surface-2); } rect.hit { fill: transparent; cursor: pointer; }
 .tl-label { fill: var(--text) !important; font-size: 12px !important; }
 .util-cell { min-width: 140px; }
+
+/* custom project fields */
+.cf-heading { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.cf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.cf-summary { display: flex; flex-wrap: wrap; gap: 2px 18px; margin: 8px 0 0; font-size: 13px; min-width: 0; }
+.cf-pair { display: flex; gap: 6px; min-width: 0; max-width: 100%; }
+.cf-pair dt { color: var(--muted); } .cf-pair dt::after { content: ":"; }
+.cf-pair dd { margin: 0; min-width: 0; overflow-wrap: anywhere; } /* a long unbroken value must wrap, not widen the page */
+.cf-link { display: inline-block; max-width: min(300px, 100%); vertical-align: bottom; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--gray-soft); padding: 1px 5px; border-radius: 4px; }
+
+/* checklists, watchers, bulk actions */
+.check-item.done .check-text { text-decoration: line-through; color: var(--muted); }
+.check-item input[type=checkbox], .table td.pick input[type=checkbox], .table th.pick input[type=checkbox] { width: 16px; height: 16px; flex: none; cursor: pointer; }
+.table th.pick, .table td.pick { width: 34px; padding-right: 0; }
+.watch-box { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.watch-box select { min-width: 0; }
+.bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; margin-bottom: 12px; border: 1px solid var(--primary);
+  border-radius: 10px; background: var(--primary-soft); }
+.bulk-bar select, .bulk-bar input[type=text], .bulk-bar input[type=date] { width: auto; min-width: 130px; }
+.chip.nowrap { white-space: nowrap; }
+/* a row of inputs that shares the width and wraps on narrow screens (the global rule makes every input 100% wide) */
+.form-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.form-row > select, .form-row > input { width: auto; flex: 1 1 130px; min-width: 0; }
+.form-row > .btn { flex: none; }
+.form-row > input[type=text] { flex: 2 1 170px; }
