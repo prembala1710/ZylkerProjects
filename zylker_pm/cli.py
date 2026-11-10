@@ -17,7 +17,7 @@ from .config import LOOPBACK_HOSTS, Config
 from .db import connect, init_db
 from .domain import ROLES
 from .errors import ApiError
-from .services import csvio, reports, users
+from .services import csvio, projection, reports, users
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -121,6 +121,22 @@ def cmd_digest(args, cfg):
     return 0
 
 
+def cmd_projection(args, cfg):
+    app = App(cfg)
+    with app.session(write=False) as ctx:
+        report = projection.early_warning(ctx, args.project)
+    text = notify.render_projection(report, cfg.public_url)
+    print(text)
+    if args.post:
+        if not cfg.cliq_endpoint:
+            print("\nCannot post: set ZYLKER_CLIQ_ENDPOINT to a Cliq incoming-webhook URL.", file=sys.stderr)
+            return 2
+        app.notifier.send(text)
+        app.notifier.flush(10)
+        print("\nPosted to Cliq (delivery is best effort; check the channel).")
+    return 3 if args.fail_if_late and report["totals"]["late_tasks"] else 0
+
+
 def cmd_backup(args, cfg):
     import os
 
@@ -198,6 +214,12 @@ def build_parser():
     p.add_argument("--project")
     p.add_argument("--post", action="store_true", help="post to the configured Cliq webhook")
     p.set_defaults(fn=cmd_digest)
+
+    p = sub.add_parser("projection", help="print (and optionally post to Cliq) which projects and tasks are projected to miss their dates, and why")
+    p.add_argument("--project", help="only this project (it is shown even when it is on track)")
+    p.add_argument("--post", action="store_true", help="post to the configured Cliq webhook")
+    p.add_argument("--fail-if-late", action="store_true", help="exit with code 3 when any task is projected to miss its due date (for scripts)")
+    p.set_defaults(fn=cmd_projection)
 
     p = sub.add_parser("backup", help="write a consistent copy of the database")
     p.add_argument("path")

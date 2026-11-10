@@ -319,3 +319,8 @@ def report_timesheet(ctx, req):
 @route("GET", "/api/reports/digest")
 def report_digest(ctx, req):
     return reports.digest(ctx, req.query)
+
+
+# ------------------------------------------------------------------ delivery projection
+
+from . import projection_routes  # noqa: E402, F401 - registers the projection endpoints
