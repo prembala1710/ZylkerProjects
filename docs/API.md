@@ -1,6 +1,6 @@
 # API reference
 
-Base path `/api`. JSON in, JSON out (`Content-Type: application/json`), except CSV import/export and attachment upload/download.
+Base path `/api`. JSON in, JSON out (`Content-Type: application/json`), except CSV and Microsoft Project import/export and attachment upload/download.
 Every endpoint except `GET /api/health` needs `Authorization: Bearer <token>`.
 
 *Role* is the minimum global role (`viewer` < `member` < `manager` < `admin`). Task-level writes by a `member`
@@ -60,6 +60,8 @@ Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric
 | `POST /api/projects/{key}/milestones` | manager | `{name, due_date, description?}` |
 | `GET /api/projects/{key}/export.csv` | viewer | All tasks as CSV (UTF-8 with BOM). Cells that could be read as spreadsheet formulas are prefixed with `'` |
 | `POST /api/projects/{key}/import` | manager | Body is CSV (`Content-Type: text/csv`, up to 5 MB / 5,000 rows). `?dry_run=true` validates without saving, `?add_missing_members=true` |
+| `GET /api/projects/{key}/export/msproject` | viewer | The project as a Microsoft Project XML file (`application/xml`, downloaded as `KEY-msproject.xml`); see [Microsoft Project](#microsoft-project) |
+| `POST /api/projects/{key}/import/msproject` | manager | Body is a Microsoft Project XML file (`Content-Type: application/xml` or `text/xml`, up to 5 MB / 5,000 tasks). `?dry_run=true` validates without saving, `?add_missing_members=true`; see [Microsoft Project](#microsoft-project) |
 | `POST /api/projects/{key}/tasks` | member | See *Task fields* below |
 
 ## Project custom fields
@@ -329,7 +331,7 @@ counts failed *attempts* in a row and resets on the next success).
 | `comment` | `comment.added` `comment.edited` `comment.deleted` |
 | `attachment` | `attachment.added` `attachment.deleted` |
 | `time` | `time.logged` `time.deleted` |
-| `import` | `import.completed` (one event per CSV import, not one per row) |
+| `import` | `import.completed` (one event per CSV or Microsoft Project import, not one per row; `details` has `created`, `skipped_duplicates` and `errors`, and `"source": "msproject"` for Microsoft Project) |
 
 A status change is `task.status_changed`; `task.updated` is every other change. `<group>.*` also covers actions that later versions
 add to the group, and `*` covers everything. `user.*` (user administration) and `webhook.*` (webhook management) are never
@@ -471,3 +473,36 @@ sentence and `reassign`, the value to pass as `?reassign=` to see the whole pict
 queues, never at skills, and never changes anything.
 
 Errors: `422` for a malformed `capacity`, `overrun`, `reassign` or `limit`; `409 projection_too_large` when there are more than 10,000 open tasks.
+
+## Microsoft Project
+
+Plans are exchanged as the XML that Microsoft Project writes with *File > Save As > XML Format* (MSPDI, namespace
+`http://schemas.microsoft.com/project`); other planning tools read and write it too. The binary `.mpp` format is not supported. The two
+endpoints are in the [Projects](#projects) table; the README ("Microsoft Project import and export") has the field-by-field mapping.
+
+`GET /api/projects/{key}/export/msproject` answers with `Content-Type: application/xml; charset=utf-8` and
+`Content-Disposition: attachment; filename="KEY-msproject.xml"`. Task *n* of the project is UID *n* (`WEB-12` is UID 12), the project row is UID 0,
+and milestones follow the tasks with the next UIDs. Nothing is stored or changed by an export.
+
+`POST /api/projects/{key}/import/msproject` takes the file itself as the request body. Tasks, milestones and dependencies are only ever
+*added*: a task that is already in the project is never edited or removed, so importing the same file twice creates nothing the second time
+(tasks are recognised by an `external_ref` of the form `msp:<file id>:<UID>`; a file that was exported from the same project is matched by UID =
+task number). Valid tasks are imported even when others are not. The answer is `200` with:
+
+| Field | Meaning |
+|---|---|
+| `dry_run` | `true` when `?dry_run=true` was given: everything is checked and counted, nothing is saved (no task numbers are used, no members added, nothing audited) |
+| `tasks_read` | Tasks found in the file (the project row and blank rows are not counted) |
+| `created` / `skipped_duplicates` | Tasks created now / tasks that were already in the project |
+| `milestones` / `links` | Milestones and dependencies created |
+| `errors` | `[{"uid": 7, "message": "..."}]`: tasks or dependencies that could not be imported, with the task's UID in the file (`null` when it is about the file as a whole) |
+| `warnings` | Same shape: things that were imported differently from the file (a name cut short, a person left unassigned, a dependency type the app does not have) |
+| `keys` | Keys of the tasks created, in file order (the first 100) |
+
+At most 200 errors and 200 warnings are listed; the last entry then says how many more there were. A real import writes one `import.completed`
+audit entry.
+
+Errors: `403` below manager role; `409 project_archived`; `413` when the body exceeds 5 MB; `415` unless the content type is `application/xml`
+or `text/xml`; `422` when the file as a whole cannot be used (empty, not well-formed, not a Microsoft Project document, has a `DOCTYPE` or
+entity declaration, nested more than 100 levels, declares a text encoding that cannot be read, or has more than 5,000 tasks) - nothing is
+imported then. The parser never expands entities and never reads anything outside the request body.

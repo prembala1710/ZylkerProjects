@@ -34,6 +34,8 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **File attachments** - attach screenshots, specs and logs to a task (pick, drop or paste), preview images, and find every file of a
   project on its Files tab; files live inside the database, so a backup captures them (see [File attachments](#file-attachments)).
 - **CSV import / export** - bring in a Jira-style export (with a dry run) or take your data out.
+- **Microsoft Project import / export** - take a plan to Microsoft Project as an XML file, or bring one in (outline, estimates, dates, people,
+  dependencies and milestones) with a dry run; see [Microsoft Project import and export](#microsoft-project-import-and-export).
 - **Custom project fields** - admins define extra text, number and URL fields (a client, a budget, a wiki link); managers fill them in
   per project (see [Custom project fields](#custom-project-fields)).
 
@@ -62,6 +64,8 @@ The same commands are available as `zylker-pm ...` after `pip install .`. Everyt
 | `zylker-pm projection [--project KEY] [--post] [--fail-if-late]` | Print which projects and tasks are projected to miss their dates, and why; `--post` sends it to Cliq, `--fail-if-late` exits with code 3 when anything is late |
 | `zylker-pm backup FILE [--force]` | Write a consistent copy of the database (safe while the server runs) |
 | `zylker-pm import-csv FILE --project KEY --as USER [--dry-run] [--add-missing-members]` | Import tasks; exit code 3 means "finished, but some rows had errors" |
+| `zylker-pm msp-export --project KEY [-o FILE]` | Write a project as a Microsoft Project XML file (`KEY-msproject.xml` unless told otherwise; `-` writes to standard output) |
+| `zylker-pm msp-import FILE --project KEY --as USER [--dry-run] [--add-missing-members]` | Import tasks, milestones and dependencies from such a file (`-` reads standard input); exit code 3 means "finished, but something was left out" |
 | `zylker-pm seed-demo` | Load fictional sample data (refuses unless there are no projects) |
 
 Global option: `--db PATH` (otherwise `$ZYLKER_DB`, then `./zylker.db`).
@@ -150,7 +154,7 @@ fields at once and an optional all-or-nothing mode (see `docs/API.md`). Cliq get
 |---|---|
 | **viewer** | Read everything: projects, tasks, reports, exports |
 | **member** | Viewer + create/edit tasks, comment, log time and link dependencies **in projects they belong to** |
-| **manager** | Member + everything in *any* project: create and edit projects, manage members and milestones, delete tasks, import CSV, see everyone's timesheet |
+| **manager** | Member + everything in *any* project: create and edit projects, manage members and milestones, delete tasks, import CSV and Microsoft Project files, see everyone's timesheet |
 | **admin** | Manager + manage users and roles, define custom project fields, delete projects, read the global audit trail |
 
 Project membership also controls who can be *assigned* work. Archived projects are read-only for all roles.
@@ -354,6 +358,48 @@ Valid rows are imported and bad rows are reported by row number - one bad row ne
 Unknown assignees are left unassigned with a warning. Subtask/parent links and milestones are not imported.
 `examples/jira_style_import.csv` is a small fictional file in this layout.
 
+## Microsoft Project import and export
+
+Plans move between this app and Microsoft Project, and other planning tools that read its XML interchange format (MSPDI), as XML files.
+In Microsoft Project save the plan with *File > Save As > XML Format*; the binary `.mpp` format is not read.
+
+- **Export:** **Project settings -> Microsoft Project -> Export for Microsoft Project** (or `GET /api/projects/KEY/export/msproject`, or
+  `zylker-pm msp-export --project KEY`). Everybody who can see the project can export it.
+- **Import:** **Project settings -> Microsoft Project -> Import from Microsoft Project** (managers and admins; or `msp-import`). Like the CSV
+  import it starts with a dry run (ticked by default), imports every task it can and lists the rest as `UID 7: ...` (the task's id in the file);
+  exit code 3 means "finished, but something was left out".
+
+| Here | In the file | Coming back in |
+|---|---|---|
+| title, description | Name, Notes | The name on one line (200 characters at most), the notes up to 20,000 |
+| parents and subtasks | OutlineLevel and WBS; a task with subtasks is a summary task | Subtasks up to five levels deep (deeper ones move up a level, with a warning). A parent at the top level becomes an *epic*, one below it a *story*, the rest *tasks* |
+| status | PercentComplete: to do 0, blocked 0, in progress 50, in review 80, done 100; cancelled is an inactive task | 0 is to do, 1-99 in progress, 100 done, inactive cancelled. A parent's status follows its subtasks, so *blocked* and *in review* come back as to do and in progress |
+| priority | 250 low, 500 medium, 750 high, 950 critical | Below 500 low, 500-599 medium, 600-899 high, 900 and up critical |
+| estimate | Duration and Work in hours (8 hours are a day); no estimate is Project's "1 day?" placeholder | Work, otherwise Duration; the placeholder and zero are no estimate |
+| start date, due date | The constraint *Start No Earlier Than* and the Deadline. Start and Finish are worked out on a Monday-Friday 08:00-17:00 calendar from the estimates and are only a suggestion | From a file this app wrote: the constraint date and the Deadline only, so dates are never invented. From any other file: the constraint date or Start, and the Deadline or Finish |
+| assignee | A resource (name, e-mail, capacity) and an assignment | Matched by e-mail, then by name, to an active user; with several people on a task the one with the most work is kept. Somebody who is not a project member is left unassigned (and reported) unless *Add missing people as members* is ticked |
+| dependencies | Predecessor links: finish-to-start, start-to-start, finish-to-finish, with the lag in days | The same three. Start-to-finish links and links to other project files are reported and skipped; lags in other units become whole working days |
+| milestones | A zero-length milestone task at the milestone's date; the tasks that belong to it are its predecessors | Milestone tasks become milestones (one with the same name and date is reused); tasks that lead into it join it; dependencies through a milestone are followed and their lags added |
+
+**What is not carried over:** task types (they follow the outline), labels, comments, checklists, watchers, related-task links, time entries,
+attachments, and custom fields; and from Project baselines, calendars, costs, resource leveling and anything else the table does not list.
+A pair of tasks keeps one dependency, so a second one the other way round is reported instead of imported.
+
+**Importing only ever adds.** A task that is already in the project is never edited or removed, so importing the same file twice creates
+nothing the second time: tasks are recognised by an `external_ref` of the form `msp:<file id>:<UID>`, and a file exported from the same project is
+matched by UID (UID 12 is `KEY-12`). Export, plan further in Project, import again, and only the tasks added in Project arrive, joined to the
+existing ones. Dependencies follow the rules of the app: one that would close a loop - even through the outline, such as a subtask that waits for
+its own parent to finish - is refused and reported, and the rest still come in. A file may hold up to 5,000 tasks and 5 MB.
+
+**The file is not trusted.** It is read with a streaming parser that refuses a `DOCTYPE` and entity declarations (so there is nothing to expand
+and nothing outside the file is ever read), limits nesting and the number of elements, keeps only the elements it needs, and every value goes
+through the same validation as the API. Text from the file is shown as text, never as markup.
+
+**How it was checked.** The export follows the element order of the MSPDI schema (a test compares it with the order the MPXJ library uses), and the
+importer reads a plan that MPXJ wrote (`tests/fixtures/mpxj_sample.xml`, made by `MakeMpxjSample.java` next to it). An export was also read back with
+MPXJ by hand when this was written; the test suite has no Java and does not repeat that. Nothing here has been opened in Microsoft Project itself, so
+use a dry run and open the exported file in your own version of Project before relying on either direction.
+
 ## File attachments
 
 Attach screenshots, specs and logs to the task they belong to: **task dialog -> Attachments -> Attach files**, or drop files anywhere in the
@@ -406,6 +452,9 @@ Not included: virus scanning, file versions, thumbnails in lists, renaming (dele
   WebP whose first bytes really are that image (the claimed type is ignored), shown through a `data:` URL in an `<img>`; SVG is never previewed.
   File names are reduced to a plain name (no directories, control or direction-override characters) and shown as text. An upload body is read
   after authentication but before the database's write lock is taken, and half an upload is never stored.
+- **Imported files are untrusted.** A Microsoft Project file is parsed without ever expanding entities or reading anything outside the request
+  (a `DOCTYPE` is refused), with limits on size, nesting and element counts, and every value is validated like an API request; names from the file
+  are shown as text.
 - **Not covered:** single sign-on (Zoho or otherwise), token expiry, failed-login throttling (tokens are unguessable, but throttle at
   the proxy anyway), e-mail notifications, per-project read restrictions (every signed-in user can read every project and its attachments), malware scanning of attachments.
 
