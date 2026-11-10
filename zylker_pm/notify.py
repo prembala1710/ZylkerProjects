@@ -112,18 +112,37 @@ def _task(key, title, public_url):
     return "%s %s" % (label, _clean(title))
 
 
+def _watching(p) -> str:
+    """Trailing line naming the people who follow the task (added to whichever message covers the change)."""
+    names = [_clean(n) for n in p.get("watchers") or [] if _clean(n)]
+    return "\n\U0001f440 Watching: %s" % ", ".join(names) if names else ""
+
+
+def _key_label(key, public_url):
+    return "[%s](%s/#/t/%s)" % (key, public_url, key) if public_url else "*%s*" % key
+
+
 def render(event: str, p: dict, public_url: str = "") -> str | None:
     task = _task(p["key"], p["title"], public_url) if "key" in p else ""
     if event == "task_assigned":
         extra = " \u00b7 priority %s" % p["priority"] if p.get("priority") else ""
         extra += " \u00b7 due %s" % p["due_date"] if p.get("due_date") else ""
-        return "\U0001f4cc %s\nAssigned to *%s* by %s%s" % (task, _clean(p["assignee"]), _clean(p["actor"]), extra)
+        return "\U0001f4cc %s\nAssigned to *%s* by %s%s%s" % (task, _clean(p["assignee"]), _clean(p["actor"]), extra, _watching(p))
     if event == "task_status":
         if p["new"] == "done":
-            return "\u2705 %s \u2014 completed by %s" % (task, _clean(p["actor"]))
+            return "\u2705 %s \u2014 completed by %s%s" % (task, _clean(p["actor"]), _watching(p))
         if p["new"] == "blocked":
-            return "\u26d4 %s \u2014 marked blocked by %s" % (task, _clean(p["actor"]))
+            return "\u26d4 %s \u2014 marked blocked by %s%s" % (task, _clean(p["actor"]), _watching(p))
         return None
+    if event == "task_watched":
+        return "\U0001f4dd %s\n%s: %s%s" % (task, _clean(p["actor"]), _clean(p["summary"]), _watching(p))
+    if event == "bulk_update":
+        shown = [_key_label(k, public_url) for k in p["keys"][:10]]
+        more = len(p["keys"]) - len(shown)
+        return "\U0001f5c2 %s updated %s: %s\n%s%s%s" % (
+            _clean(p["actor"]), "1 task" if len(p["keys"]) == 1 else "%d tasks" % len(p["keys"]), _clean(p["summary"]),
+            ", ".join(shown), " and %d more" % more if more > 0 else "", _watching(p),
+        )  # fmt: skip
     if event == "mention":
         return "\U0001f4ac %s mentioned %s on %s: \u201c%s\u201d" % (
             _clean(p["actor"]), _clean(p["mentioned"]), task, _clean(p["excerpt"]),

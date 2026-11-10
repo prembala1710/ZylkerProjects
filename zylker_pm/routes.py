@@ -7,8 +7,16 @@ import re
 from . import __version__
 from .app import Raw, route
 from .domain import (
+    BULK_MAX_TASKS,
     CLOSED_STATUSES,
+    DEFAULT_DEPENDENCY_TYPE,
+    DEPENDENCY_TYPES,
+    LINK_TYPES,
+    MAX_CHECKLIST_ITEMS,
+    MAX_CHECKLIST_TEXT,
+    MAX_LAG_DAYS,
     MAX_TASK_DEPTH,
+    MAX_WATCHERS,
     OPEN_STATUSES,
     PRIORITIES,
     PROJECT_STATUSES,
@@ -18,7 +26,23 @@ from .domain import (
     TRANSITIONS,
 )
 from .errors import NotFound, ValidationError
-from .services import activity, collab, csvio, deps, milestones, projects, reports, taskrefs, tasks, users
+from .services import (
+    activity,
+    bulk,
+    checklist,
+    collab,
+    csvio,
+    deps,
+    links,
+    milestones,
+    project_fields,
+    projects,
+    reports,
+    taskrefs,
+    tasks,
+    users,
+    watchers,
+)
 from .util import truthy
 
 
@@ -66,6 +90,17 @@ def meta(ctx, req):
         "roles": list(ROLES),
         "transitions": {k: list(v) for k, v in TRANSITIONS.items()},
         "max_task_depth": MAX_TASK_DEPTH,
+        "project_field_types": list(project_fields.FIELD_TYPES),
+        "project_field_limits": project_fields.LIMITS,
+        "dependency_types": list(DEPENDENCY_TYPES),
+        "default_dependency_type": DEFAULT_DEPENDENCY_TYPE,
+        "max_lag_days": MAX_LAG_DAYS,
+        "link_types": list(LINK_TYPES),
+        "max_checklist_items": MAX_CHECKLIST_ITEMS,
+        "max_checklist_text": MAX_CHECKLIST_TEXT,
+        "max_watchers": MAX_WATCHERS,
+        "bulk_max_tasks": BULK_MAX_TASKS,
+        "bulk_fields": list(bulk.CHANGE_FIELDS),
     }
 
 
@@ -207,12 +242,41 @@ def create_task(ctx, req, key):
     return 201, tasks.create_task(ctx, key, req.json())
 
 
+# ------------------------------------------------------------------- project fields
+
+
+@route("GET", "/api/project-fields")
+def list_project_fields(ctx, req):
+    return {"items": project_fields.list_fields(ctx)}
+
+
+@route("POST", "/api/project-fields", role="admin")
+def create_project_field(ctx, req):
+    return 201, project_fields.create_field(ctx, req.json())
+
+
+@route("PATCH", "/api/project-fields/{field_key}", role="admin")
+def update_project_field(ctx, req, field_key):
+    return project_fields.update_field(ctx, field_key, req.json())
+
+
+@route("DELETE", "/api/project-fields/{field_key}", role="admin")
+def delete_project_field(ctx, req, field_key):
+    project_fields.delete_field(ctx, field_key, req.query.get("confirm"))
+    return 204, None
+
+
 # ---------------------------------------------------------------------------- tasks
 
 
 @route("GET", "/api/tasks")
 def list_tasks(ctx, req):
     return tasks.list_tasks(ctx, req.query)
+
+
+@route("POST", "/api/tasks/bulk", role="member")
+def bulk_update(ctx, req):
+    return bulk.bulk_update(ctx, req.json())
 
 
 @route("GET", "/api/tasks/{key}")
@@ -242,9 +306,63 @@ def add_dependency(ctx, req, key):
     return deps.add_dependency(ctx, key, req.json())
 
 
+@route("PATCH", "/api/tasks/{key}/dependencies/{other}", role="member")
+def update_dependency(ctx, req, key, other):
+    return deps.update_dependency(ctx, key, other, req.json())
+
+
 @route("DELETE", "/api/tasks/{key}/dependencies/{other}", role="member")
 def remove_dependency(ctx, req, key, other):
     return deps.remove_dependency(ctx, key, other)
+
+
+@route("POST", "/api/tasks/{key}/links", role="member")
+def add_link(ctx, req, key):
+    links.add_link(ctx, key, req.json())
+    return 201, tasks.get_task(ctx, key)
+
+
+@route("DELETE", "/api/tasks/{key}/links/{other}", role="member")
+def remove_link(ctx, req, key, other):
+    links.remove_link(ctx, key, other)
+    return tasks.get_task(ctx, key)
+
+
+@route("GET", "/api/tasks/{key}/watchers")
+def list_watchers(ctx, req, key):
+    return watchers.list_watchers(ctx, key)
+
+
+@route("POST", "/api/tasks/{key}/watchers")
+def add_watcher(ctx, req, key):
+    return watchers.add_watcher(ctx, key, req.json())
+
+
+@route("DELETE", "/api/tasks/{key}/watchers/{username}")
+def remove_watcher(ctx, req, key, username):
+    watchers.remove_watcher(ctx, key, username)
+    return 204, None
+
+
+@route("GET", "/api/tasks/{key}/checklist")
+def list_checklist(ctx, req, key):
+    return {"items": checklist.list_items(ctx, key)}
+
+
+@route("POST", "/api/tasks/{key}/checklist", role="member")
+def add_checklist_item(ctx, req, key):
+    return 201, checklist.add_item(ctx, key, req.json())
+
+
+@route("PATCH", "/api/checklist/{item_id}", role="member")
+def update_checklist_item(ctx, req, item_id):
+    return checklist.update_item(ctx, _id(item_id, "checklist_item"), req.json())
+
+
+@route("DELETE", "/api/checklist/{item_id}", role="member")
+def delete_checklist_item(ctx, req, item_id):
+    checklist.delete_item(ctx, _id(item_id, "checklist_item"))
+    return 204, None
 
 
 @route("GET", "/api/tasks/{key}/comments")

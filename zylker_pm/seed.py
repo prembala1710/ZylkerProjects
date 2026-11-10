@@ -11,7 +11,13 @@ from contextlib import contextmanager
 from datetime import datetime, time, timedelta, timezone
 
 from . import notify
-from .services import collab, deps, milestones, projects, tasks, users
+from .services import checklist, collab, deps, links, milestones, project_fields, projects, tasks, users, watchers
+
+DEMO_FIELDS = [
+    {"key": "client", "label": "Client", "type": "text", "max_length": 80, "description": "Who the work is for"},
+    {"key": "budget_usd", "label": "Budget (USD)", "type": "number", "decimals": 0, "min_value": 0, "description": "Approved budget"},
+    {"key": "wiki", "label": "Wiki", "type": "url", "description": "Where the project documentation lives"},
+]
 
 DEMO_USERS = [
     ("alice", "Alice Morgan", "manager", 40),
@@ -51,6 +57,15 @@ def _seed(app, today):
                     ctx, {"username": username, "display_name": name, "role": role, "weekly_capacity_hours": capacity}
                 )
             rows[username] = users.find_by_username(ctx.conn, username)
+        # Demo fields only on an organisation that has defined none of its own, so they can never clash with
+        # real definitions (a different type for the same key, or a required field the demo cannot satisfy).
+        own_fields = project_fields.list_fields(ctx)
+        if any(f["required"] for f in own_fields):
+            raise RuntimeError("Refusing to seed demo data: the demo projects cannot fill in the required custom project fields that are defined")
+        with_fields = not own_fields
+        if with_fields:
+            for definition in DEMO_FIELDS:
+                project_fields.create_field(ctx, definition)
 
     @contextmanager
     def act(username, offset):
@@ -83,6 +98,7 @@ def _seed(app, today):
             "key": "WEB", "name": "Website Redesign", "start_date": d(-30), "due_date": d(30),
             "description": "Replace the marketing site with the new design system and an accessible, faster build.",
             "members": ["bob", "carol", "dave"],
+            "custom_fields": {"client": "Zylker Retail", "budget_usd": 120000, "wiki": "https://wiki.example.com/website-redesign"} if with_fields else {},
         })  # fmt: skip
         m_design = milestones.create_milestone(ctx, "WEB", {"name": "Design sign-off", "due_date": d(-5)})["id"]
         m_beta = milestones.create_milestone(ctx, "WEB", {"name": "Beta launch", "due_date": d(14)})["id"]
@@ -131,6 +147,7 @@ def _seed(app, today):
             "key": "APP", "name": "Mobile App v2", "start_date": d(-45), "due_date": d(10),
             "description": "Second major release of the mobile app: offline mode, push notifications and a new onboarding.",
             "members": ["carol", "dave"],
+            "custom_fields": {"client": "Zylker Mobile", "budget_usd": 250000, "wiki": "https://wiki.example.com/mobile-app-v2"} if with_fields else {},
         })  # fmt: skip
         m_beta = milestones.create_milestone(ctx, "APP", {"name": "TestFlight beta", "due_date": d(-7)})["id"]
         m_store = milestones.create_milestone(ctx, "APP", {"name": "Store submission", "due_date": d(10)})["id"]
@@ -162,6 +179,17 @@ def _seed(app, today):
         create(ctx, "INT", "Design message cards", assignee="alice", estimate_hours=5, due_date=d(21))
         create(ctx, "INT", "Draft rollout plan", priority="low")
     block("alice", -2, "INT-2", "INT-1")
+
+    # ------------------------------------- checklists, watchers and related tasks (none of these affect health)
+    with act("bob", -1) as ctx:
+        for text, done in (("Hero section", True), ("Card grid", True), ("Mobile spacing pass", False), ("Review with design", False)):
+            checklist.add_item(ctx, "WEB-5", {"text": text, "done": done})
+    with act("alice", 0) as ctx:
+        watchers.add_watcher(ctx, "WEB-8", {})
+        watchers.add_watcher(ctx, "APP-1", {})
+        links.add_link(ctx, "WEB-8", {"type": "relates_to", "task": "APP-1"})
+    with act("carol", 0) as ctx:
+        watchers.add_watcher(ctx, "WEB-8", {})
 
     at(0)
     return tokens
