@@ -475,7 +475,7 @@ function workloadCard(workload) {
 }
 
 /* ============================== webhooks (admin) ============================== */
-const WEBHOOK_GROUP_LABEL = { project: 'Projects', milestone: 'Milestones', task: 'Tasks', checklist: 'Checklists', watcher: 'Watchers', project_field: 'Project fields', comment: 'Comments', attachment: 'Attachments', time: 'Time tracking', import: 'CSV import' };
+const WEBHOOK_GROUP_LABEL = { project: 'Projects', milestone: 'Milestones', task: 'Tasks', checklist: 'Checklists', watcher: 'Watchers', project_field: 'Project fields', comment: 'Comments', attachment: 'Attachments', time: 'Time tracking', import: 'Imports' };
 const DELIVERY_BADGE = { succeeded: ['done', 'Delivered'], failed: ['blocked', 'Failed'], pending: ['todo', 'Queued'], sending: ['in_progress', 'Sending'] };
 const DELIVERY_ERROR = { timeout: 'timed out', connection_failed: 'could not connect', dns_error: 'host name did not resolve', tls_error: 'TLS certificate problem',
   blocked_address: 'address is private (blocked)', protocol_error: 'invalid HTTP response', invalid_request: 'invalid request', internal_error: 'internal error',
@@ -918,15 +918,17 @@ function bulkReport(res) {
       rows.map((r) => h('div', { class: 'item' }, h('strong', { class: 'nowrap', text: r.key }), h('span', { class: 'grow small', text: new ApiError(409, r.error).message })))),
     footer: [h('button', { class: 'btn primary', onclick: () => m.close() }, 'OK')] });
 }
-async function downloadCsv(key) {
+async function downloadFile(path, filename) {
   try {
-    const blob = await api(`/projects/${key}/export.csv`, { blob: true });
+    const blob = await api(path, { blob: true });
     const url = URL.createObjectURL(blob);
-    const a = h('a', { href: url, download: `${key}-tasks.csv` });
+    const a = h('a', { href: url, download: filename });
     document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   } catch (e) { toast(e.message, 'error'); }
 }
+function downloadCsv(key) { return downloadFile(`/projects/${key}/export.csv`, `${key}-tasks.csv`); }
+function downloadMsProject(key) { return downloadFile(`/projects/${key}/export/msproject`, `${key}-msproject.xml`); }
 
 /* ---------- timeline ---------- */
 async function timelineTab(root, ctx) {
@@ -1185,7 +1187,7 @@ function describeActivity(a) {
     case 'project_field.deleted': return `deleted the project field \u201c${d.label}\u201d (removed ${plural(d.values_removed, 'value')})`;
     case 'project.member_added': return `added ${d.user} to the project`;
     case 'project.member_removed': return `removed ${d.user} from the project`;
-    case 'import.completed': return `imported tasks from CSV: ${d.created} created, ${d.skipped_duplicates} skipped, ${d.errors} errors`;
+    case 'import.completed': return `imported tasks from ${d.source === 'msproject' ? 'Microsoft Project' : 'CSV'}: ${d.created} created, ${d.skipped_duplicates} skipped, ${d.errors} errors`;
     default: return a.action;
   }
 }
@@ -1244,6 +1246,7 @@ async function settingsTab(root, ctx) {
     h('div', { class: 'card' }, h('h2', { text: 'Members' }), h('p', { class: 'small muted', text: 'Members can be assigned work and can edit tasks in this project.' }), memberList,
       manage ? h('div', { class: 'row', style: { marginTop: '10px' } }, addSel, h('button', { class: 'btn', onclick: (e) => guarded(e.target, async () => { if (!addSel.value) return; Object.assign(project, await api(`/projects/${key}/members`, { method: 'POST', body: { username: addSel.value } })); route(); }) }, 'Add')) : null)),
     manage ? importCard(key) : null,
+    msprojectCard(key, manage),
     hasRole('admin') ? h('div', { class: 'card', style: { marginTop: '16px' } }, h('h2', { text: 'Danger zone' }), h('p', { class: 'small muted', text: 'Deleting a project permanently removes its tasks, comments, time entries and history.' }),
       h('button', { class: 'btn danger', onclick: () => deleteProjectDialog(project) }, 'Delete project\u2026')) : null);
 }
@@ -1265,6 +1268,30 @@ function importCard(key) {
   return h('div', { class: 'card', style: { marginTop: '16px' } }, h('h2', { text: 'Import tasks from CSV' }),
     h('p', { class: 'small muted', text: 'Columns recognised: title/summary, description, type, status, priority, assignee, reporter, start date, due date, estimate (hours), labels, key. Re-importing a file never duplicates tasks that have the same key.' }),
     h('div', { class: 'row wrap' }, file, h('label', { class: 'row small' }, dry, 'Dry run first'), h('label', { class: 'row small' }, addMem, 'Add missing assignees as members'), run), out);
+}
+function msprojectCard(key, manage) {
+  const file = h('input', { type: 'file', accept: '.xml,application/xml,text/xml', 'aria-label': 'Microsoft Project XML file' });
+  const dry = h('input', { type: 'checkbox', checked: true });
+  const addMem = h('input', { type: 'checkbox' });
+  const out = h('div', { class: 'stack small', style: { marginTop: '10px' } });
+  const notes = (items, title, cls) => items.length ? h('div', {}, h('strong', { class: cls, text: title }),
+    items.slice(0, 20).map((e) => h('div', { class: cls === 'error-text' ? '' : 'muted', text: e.uid === null || e.uid === undefined ? e.message : `UID ${e.uid}: ${e.message}` })),
+    items.length > 20 ? h('div', { class: 'muted', text: `\u2026and ${items.length - 20} more` }) : null) : null;
+  const run = h('button', { class: 'btn primary', onclick: () => guarded(run, async () => {
+    if (!file.files[0]) { toast('Choose a Microsoft Project XML file first', 'error'); return; }
+    const data = await file.files[0].arrayBuffer(); // the bytes as they are: the file says which encoding it uses
+    const r = await api(`/projects/${key}/import/msproject`, { method: 'POST', body: data, contentType: 'application/xml', query: { dry_run: dry.checked ? 'true' : '', add_missing_members: addMem.checked ? 'true' : '' } });
+    clear(out);
+    out.append(h('div', {}, h('strong', { text: r.dry_run ? 'Dry run \u2014 nothing was saved. ' : 'Import finished. ' }),
+      `${r.tasks_read} tasks read: ${r.created} ${r.dry_run ? 'would be created' : 'created'}, ${r.skipped_duplicates} already here, ${plural(r.milestones, 'milestone')}, ${r.links} ${r.links === 1 ? 'dependency' : 'dependencies'}, ${plural(r.errors.length, 'error')}, ${plural(r.warnings.length, 'warning')}.`),
+      notes(r.errors, 'Errors', 'error-text'), notes(r.warnings, 'Warnings', ''));
+    if (!r.dry_run && r.created) { toast(`${plural(r.created, 'task')} imported`, 'ok'); }
+  }) }, 'Run Microsoft Project import');
+  return h('div', { class: 'card', style: { marginTop: '16px' } }, h('h2', { text: 'Microsoft Project' }),
+    h('p', { class: 'small muted', text: 'Exports the tasks, subtasks, milestones, dependencies, estimates, dates and assignees as a Microsoft Project XML file (the MSPDI format, not .mpp). Import adds what a file of that kind contains and never changes tasks that are already here.' }),
+    h('div', { class: 'row wrap' }, h('button', { class: 'btn', onclick: () => downloadMsProject(key) }, 'Export for Microsoft Project')),
+    manage ? h('div', { class: 'stack', style: { marginTop: '14px' } }, h('div', { class: 'cf-heading', text: 'Import from Microsoft Project' }),
+      h('div', { class: 'row wrap' }, file, h('label', { class: 'row small' }, dry, 'Dry run (check only, save nothing)'), h('label', { class: 'row small' }, addMem, 'Add missing people as members'), run), out) : null);
 }
 function deleteProjectDialog(project) {
   const input = h('input', { type: 'text', placeholder: project.key, 'aria-label': 'Type the project key to confirm' });
