@@ -176,6 +176,18 @@ select.inline { width: auto; }
 .token-box { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--surface-2); border: 1px solid var(--border);
   border-radius: 8px; padding: 10px; word-break: break-all; user-select: all; }
 
+/* delivery projection */
+.chip.late { background: var(--bad-soft); color: var(--bad); font-weight: 700; }
+#projection .table { margin-top: 8px; }
+.scroll-x { overflow-x: auto; }
+#projection .table td { vertical-align: top; }
+.whatif select, .whatif input[type=number] { width: auto; }
+#projection details summary { cursor: pointer; color: var(--muted); }
+#projection a.btn { color: inherit; text-decoration: none; }
+#projection td.why { min-width: 240px; }
+#projection-advice .item { align-items: flex-start; }
+#projection-advice .item .btn { flex: none; }
+
 /* ---------- login ---------- */
 .login { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
 .login .card { width: min(440px, 100%); padding: 28px; }
