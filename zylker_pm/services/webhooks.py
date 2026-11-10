@@ -41,6 +41,7 @@ EVENT_GROUPS = {
     "watcher": ("added", "removed"),
     "project_field": ("created", "updated", "deleted"),
     "comment": ("added", "edited", "deleted"),
+    "attachment": ("added", "deleted"),
     "time": ("logged", "deleted"),
     "import": ("completed",),
 }

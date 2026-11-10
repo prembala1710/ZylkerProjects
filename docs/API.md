@@ -327,6 +327,7 @@ counts failed *attempts* in a row and resets on the next success).
 | `watcher` | `watcher.added` `watcher.removed` |
 | `project_field` | `project_field.created` `project_field.updated` `project_field.deleted` |
 | `comment` | `comment.added` `comment.edited` `comment.deleted` |
+| `attachment` | `attachment.added` `attachment.deleted` |
 | `time` | `time.logged` `time.deleted` |
 | `import` | `import.completed` (one event per CSV import, not one per row) |
 
