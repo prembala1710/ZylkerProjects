@@ -278,7 +278,10 @@ counts failed *attempts* in a row and resets on the next success).
 |---|---|
 | `project` | `project.created` `project.updated` `project.deleted` `project.member_added` `project.member_removed` |
 | `milestone` | `milestone.created` `milestone.updated` `milestone.deleted` |
-| `task` | `task.created` `task.updated` `task.status_changed` `task.deleted` `task.dependency_added` `task.dependency_removed` |
+| `task` | `task.created` `task.updated` `task.status_changed` `task.deleted` `task.dependency_added` `task.dependency_updated` `task.dependency_removed` `task.link_added` `task.link_removed` |
+| `checklist` | `checklist.added` `checklist.removed` |
+| `watcher` | `watcher.added` `watcher.removed` |
+| `project_field` | `project_field.created` `project_field.updated` `project_field.deleted` |
 | `comment` | `comment.added` `comment.edited` `comment.deleted` |
 | `time` | `time.logged` `time.deleted` |
 | `import` | `import.completed` (one event per CSV import, not one per row) |

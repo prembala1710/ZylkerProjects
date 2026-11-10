@@ -36,7 +36,10 @@ log = logging.getLogger("zylker.webhooks")
 EVENT_GROUPS = {
     "project": ("created", "updated", "deleted", "member_added", "member_removed"),
     "milestone": ("created", "updated", "deleted"),
-    "task": ("created", "updated", "status_changed", "deleted", "dependency_added", "dependency_removed"),
+    "task": ("created", "updated", "status_changed", "deleted", "dependency_added", "dependency_updated", "dependency_removed", "link_added", "link_removed"),
+    "checklist": ("added", "removed"),
+    "watcher": ("added", "removed"),
+    "project_field": ("created", "updated", "deleted"),
     "comment": ("added", "edited", "deleted"),
     "time": ("logged", "deleted"),
     "import": ("completed",),
