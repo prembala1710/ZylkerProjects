@@ -181,7 +181,8 @@ class PageTests(UiCase):
         expect(page.locator("svg.chart").first).to_be_visible()
         self.assert_clean_text(page, "reports (manager)")
         page.evaluate("location.hash = '#/p/WEB/board'")
-        page.get_by_text("Homepage layout").click()
+        # the card, not any text: until the board has replaced the reports the old page is still on screen, and the title appears in its tables
+        page.locator(".task-card", has_text="Homepage layout").click()
         expect(page.locator(".modal")).to_be_visible()
         self.settle(page)
         self.assert_clean_text(page, "task dialog")

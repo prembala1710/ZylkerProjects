@@ -425,3 +425,49 @@ dropped with a warning in the server log rather than slowing requests down.
   written to logs either.
 - Destinations are checked when saved and again at delivery time against the addresses the name resolves to (see the README),
   and the connection is made to the address that was checked. Payloads are signed, not encrypted: use `https`.
+
+## Delivery projection
+
+Plays the open work forward and says which tasks will miss their due dates, by how many days and why. It is read-only and stores
+nothing. Every project that is `planning` or `active` is scheduled together, so a person shared between projects is not promised to
+both; the README lists the scheduling rules.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/projects/{key}/projection` | viewer | The project's projection. `?capacity=bob:50,carol:80` (percent of normal availability, 0-200), `?overrun=20` (percent extra effort on every task, 0-300) and `?reassign=WEB-3:carol,WEB-4:dave` (somebody else does that task) are what-if options; with any of them the answer carries a `scenario` block comparing it with the unchanged plan |
+| `GET /api/projects/{key}/projection/advice` | viewer | Which single reassignment would help most: `?limit=1..10` suggestions (default 3), see below |
+| `GET /api/reports/projection` | viewer | One line per project that is not archived (worst first): `state`, `finish`, `due_date`, `late_by_days`, `verdict`, `headline`, `open_tasks`, `late_tasks`. Takes the same what-if options |
+
+`GET /api/projects/{key}/projection` returns `state` (`projected`, `complete` when nothing is open, `not_projected` for projects on hold,
+completed or archived, with a `reason`), `finish` (the day the last task is done), `due_date`, `late_by_days` (days after the project's due
+date, 0 when it fits, `null` when there is nothing to compare), `verdict` (`on_track`, `will_miss`, `no_due_date`, `unknown` when some
+work cannot be scheduled), a plain-English `headline`, and `counts` (`open_tasks`, `late_tasks`, `unprojectable`, `overdue_tasks`).
+It also lists:
+
+- `tasks`: every open leaf task, late ones first (at most 1,000; `tasks_truncated` says whether the list was cut). Each has
+  `projected_start`, `projected_finish`, `margin_days` (negative when late), `late_by_days`, `remaining_hours`, `overdue`, and `state`
+  (`scheduled`, `no_capacity`, `waiting_for_unschedulable`, `beyond_horizon`). `why` is structured (`kind`: `immediately`, `blocker`,
+  `queue` or `start_date`, with the `task` it followed and the date `until` which it was busy) and `explanation` says the same in a
+  sentence, including the root cause of a delay. `notes` lists the assumptions made for this task (no estimate, unassigned, flagged blocked...).
+- `milestones`: each with its `open_tasks`, `projected_finish` and `late_by_days`.
+- `people`: whoever is assigned work in the project: `hours_per_day`, `capacity_pct` (what-if), `open_hours` (all projects) and
+  `open_hours_here`, `late_tasks` and `busy_until` (all projects).
+- `assumptions`: the rules in force (work days, default hours, the pace of unassigned work, the horizon of 1,300 working days).
+
+Each `reassign` item names an open task of a project that is being worked on (not a parent task) and a user who is an active member of that
+project; anything else is a `422` that says what is wrong. With the option the task is scheduled as if it were assigned to that person
+(the task itself is not changed), and `scenario.reassign` lists `task`, `to` and `to_name`.
+
+`GET /api/projects/{key}/projection/advice` takes the tasks of the project that the late work had to wait for (the late tasks, the tasks
+that end a late project and those that cannot be scheduled, and everything they followed in somebody's queue or waited on), tries giving each of
+them, one at a time, to every other member of the project who has capacity, schedules again, and keeps the moves that improve the project -
+fewer tasks that cannot be scheduled, or fewer days late, or fewer late tasks - without making a task in another project late or unschedulable. It
+returns `suggestions` (best first: the best move for each task, ranked by the same three measures and then by when everything would be
+done), `tried` (how many reassignments were scheduled), `limited` (true when the search was cut short: at most 60 reassignments are tried,
+fewer when each means scheduling a great many tasks again) and `reason` (why there are no suggestions: nothing is late, the project is not being worked on, or no
+single move helps). Each suggestion has `task`, `title`, `from`, `to` (with `open_hours` and `busy_until`, the person's other work),
+`before` and `after` (`finish`, `late_by_days`, `late_tasks`, `unprojectable`, the numbers the projection would report), a `summary`
+sentence and `reassign`, the value to pass as `?reassign=` to see the whole picture with that move. The advice looks only at capacity and
+queues, never at skills, and never changes anything.
+
+Errors: `422` for a malformed `capacity`, `overrun`, `reassign` or `limit`; `409 projection_too_large` when there are more than 10,000 open tasks.

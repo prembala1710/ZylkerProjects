@@ -23,6 +23,10 @@ standard library alone - **no packages to install, no build step** - and stores 
   milestones and the critical path highlighted.
 - **Health you can trust** - every project gets an on-track / at-risk / off-track status with the *reasons* spelled out
   (see [How health is decided](#how-health-is-decided)); a portfolio dashboard sorts the worst first.
+- **Delivery projection** - health tells you how a project looks today; the projection plays the open work forward, using
+  dependencies, priorities and each person's capacity across all projects at once, and tells you which tasks *will* miss their
+  dates, by how many days and why, while there is still time to act, and which single reassignment would help most.
+  See [Delivery projection](#delivery-projection).
 - **Workload and capacity** - estimated work due in the next N weeks vs each person's weekly capacity, with overallocation flagged.
 - **Burndown, critical path, timesheets, digests** - computed live from the data.
 - **Roles and an audit trail** - viewer / member / manager / admin, per-project membership, and a field-level history of every change.
@@ -55,6 +59,7 @@ The same commands are available as `zylker-pm ...` after `pip install .`. Everyt
 | `zylker-pm create-user USER --role member --name "..." [--capacity 30]` | Add a person and print their token |
 | `zylker-pm rotate-token USER` | Issue a new token; the old one stops working immediately |
 | `zylker-pm digest [--days 3] [--project KEY] [--post]` | Print the overdue / due-soon digest; `--post` sends it to Cliq |
+| `zylker-pm projection [--project KEY] [--post] [--fail-if-late]` | Print which projects and tasks are projected to miss their dates, and why; `--post` sends it to Cliq, `--fail-if-late` exits with code 3 when anything is late |
 | `zylker-pm backup FILE [--force]` | Write a consistent copy of the database (safe while the server runs) |
 | `zylker-pm import-csv FILE --project KEY --as USER [--dry-run] [--add-missing-members]` | Import tasks; exit code 3 means "finished, but some rows had errors" |
 | `zylker-pm seed-demo` | Load fictional sample data (refuses unless there are no projects) |
@@ -197,6 +202,69 @@ Hours are effort, not calendar time. Tasks with no slack form the critical path.
 ideal line drawn from the scope on the first day and a *scope* line that rises when tasks are added. A task that is closed and
 later reopened is shown as open for the whole range, because only the latest closing time is stored.
 
+## Delivery projection
+
+Most trackers tell you a task is late once its due date has passed. The projection plays the plan forward instead, so you hear about a
+slip while there is still time to do something about it.
+
+It takes every open leaf task of every project that is *planning* or *active*, the hours each still needs, who is assigned, what each
+task is blocked by and how many hours a week each person can work, and schedules **all of it together**: a person who is shared between
+two projects is never promised to both. For every task you get a projected start and finish, how many days late it will be, and a
+plain-language reason, for example:
+
+> *APP-7 Release notes: waits for APP-6 (Beta feedback fixes), which finishes Tue 24 Nov. The delay starts in Carol Diaz's queue: busy
+> with APP-2 until Fri 20 Nov.*
+
+Following the links back from a late task is how the cause of a slip is found: here it is not APP-7, nor APP-6, but one person's queue.
+
+**Where you see it**
+
+- **Dashboard:** a *Projected finish* column ("4 days after the due date", "4 tasks will be late").
+- **Board and list:** a red clock chip such as `+8d` on every task that is projected to miss its due date.
+- **Task dialog:** the projected finish and the reason, plus the assumptions that were made for that task.
+- **Reports tab:** the project's headline, the tasks that will slip and why, **what would help** (see below), milestones at risk, who is
+  carrying the work, and a **What if...** form: *what if Carol is only 50% available? what if everything takes 20% longer?* The answer
+  shows how far the finish moves and how many more tasks become late. The same options are available as `?capacity=carol:50&overrun=20`.
+- **Terminal and Cliq:** `zylker-pm projection` prints the early warning (only the projects that need attention, worst first, each of
+  the worst three with its best suggested fix); `--post` sends it to the Cliq channel, so a cron job can announce it on Monday morning;
+  `--fail-if-late` makes the exit code 3 for scripts.
+
+**How it schedules.** The rules are deliberately simple, so that every date can be explained:
+
+- Work days are Monday to Friday and there is no holiday or leave calendar. The plan starts at the beginning of the first working day
+  on or after today.
+- A person works their weekly capacity spread evenly over the five days, on **one task at a time**, and is not pulled off a task they
+  have started. When they are free they take the ready task with the highest priority, then the earliest due date. Nobody sits idle if
+  there is something they could be doing.
+- A task is *ready* when everything it is blocked by has finished and its start date has arrived. Something that waits for a parent task
+  waits for all of the parent's open subtasks and for whatever the parent itself waits for.
+- Remaining work is the estimate minus the time already logged. A task without an estimate counts `default_task_hours` (8), the same
+  assumption the critical path makes. A task with nothing left but to close it finishes as soon as it is ready.
+- A task with nobody assigned (or whose assignee is deactivated) proceeds at 8 hours a day without queueing. A person with a capacity
+  of 0 cannot finish anything, and neither can what waits for them; the projection says so instead of guessing.
+- Projects that are on hold, completed or archived are left out, and so is their work, which no longer takes anyone's time.
+
+**What would help.** A warning is more useful with a way out. For a project that is going to slip, the advice looks at the tasks that
+the late work had to wait for - the late tasks themselves and whatever stood in front of them in somebody's queue - and tries giving each
+of them, one at a time, to every other member of the project who has capacity. It plays the schedule again and keeps the moves that make
+things better: fewer tasks that cannot be scheduled, or fewer days late, or fewer late tasks. A move is dropped if it would make a task in
+another project late or unschedulable, so the problem is never just pushed onto somebody else. The best move for each task is listed best
+first, with its effect in words:
+
+> *Give APP-2 (Push notifications) to Alice Morgan instead of Carol Diaz: the project would finish Mon 16 Nov, 4 days before the due date,
+> and 2 tasks would be late; now it finishes Tue 24 Nov, 4 days after the due date, and 4 tasks are late.*
+
+**Preview** shows the whole picture with that move (`?reassign=APP-2:alice`, which also works for any task and member you like) and **Reset**
+puts the plan back. Nothing is ever changed: you make the move yourself in the task. At most 60 reassignments are tried, and fewer when
+each one means scheduling a great many tasks again, so the answer is never slow; the work that is late or cannot be scheduled goes first,
+and the answer says when the search was cut short. The advice looks only at capacity and queues, not at skills or at who knows the
+code: it is a starting point for a conversation.
+
+**What it is not.** It is a projection, not a promise. Estimates are taken at face value, tasks are not split or pre-empted, there are no
+holidays, and a task flagged *blocked* is assumed to unblock now (the task says so). The what-if options exist to show how sensitive the
+answer is. It does not change health (which stays rule-based and explainable), nothing is stored, and every number is computed from live
+data when you ask. More than 10,000 open tasks are refused with a clear error rather than answered slowly.
+
 ## Zoho Cliq
 
 Set `ZYLKER_CLIQ_ENDPOINT` to your channel's incoming-webhook URL and the server posts, best effort and in the background (a
@@ -209,6 +277,7 @@ Cliq outage never fails a request, and nothing is sent for a request that was ro
 - a bulk action changes several tasks (one summary message, not one per task)
 - a project's status changes
 - the digest, when you run `zylker-pm digest --post`
+- the delivery projection, with a suggested fix for the worst projects, when you run `zylker-pm projection --post`
 
 Schedule the digest with whatever you already use, for example cron on weekdays at 09:00:
 

@@ -439,6 +439,10 @@ def report_digest(ctx, req):
     return reports.digest(ctx, req.query)
 
 
-# ----------------------------------------------------------------------- attachments
+# ----------------------------------------------------------------------- feature endpoints
 
-from . import attachment_routes  # noqa: E402, F401 - registers the attachment endpoints
+# Each module registers its own endpoints when it is imported: file attachments and the delivery projection.
+from . import (  # noqa: E402
+    attachment_routes,  # noqa: F401
+    projection_routes,  # noqa: F401
+)

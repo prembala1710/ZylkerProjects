@@ -44,6 +44,7 @@ const TYPE_LABEL = { task: 'Task', bug: 'Bug', story: 'Story', epic: 'Epic' };
 const HEALTH_LABEL = { on_track: 'On track', at_risk: 'At risk', off_track: 'Off track', complete: 'Complete', not_started: 'Not started', on_hold: 'On hold' };
 const PROJECT_STATUS_LABEL = { planning: 'Planning', active: 'Active', on_hold: 'On hold', completed: 'Completed', archived: 'Archived' };
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const WEEKDAY_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const ROLES = ['viewer', 'member', 'manager', 'admin'];
 const DEP_TYPE_LABEL = { finish_to_start: 'Finish \u2192 Start', start_to_start: 'Start \u2192 Start', finish_to_finish: 'Finish \u2192 Finish' };
 const DEP_TYPE_SHORT = { finish_to_start: 'FS', start_to_start: 'SS', finish_to_finish: 'FF' };
@@ -67,6 +68,10 @@ function fmtDate(s) {
   const same = state.today && d.getFullYear() === parseDate(state.today).getFullYear();
   return `${d.getDate()} ${MONTHS[d.getMonth()]}${same ? '' : ' ' + d.getFullYear()}`;
 }
+function fmtDay(s) {
+  const d = parseDate(s);
+  return d ? `${WEEKDAY_SHORT[(d.getDay() + 6) % 7]} ${fmtDate(s)}` : '\u2014';
+}
 const fmtHours = (n) => (n === null || n === undefined ? '\u2014' : `${Math.round(n * 10) / 10}h`);
 function fmtAgo(iso) {
   const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -87,6 +92,10 @@ function avatar(user) {
   return h('span', { class: 'avatar c' + (strHash(user.username) % 8), title: user.display_name }, initials);
 }
 const badge = (kind, text, title) => h('span', { class: 'badge ' + kind, title }, text);
+const lateChip = (info) => h('span', { class: 'chip late', title: `Projected to finish ${fmtDate(info.projected_finish)}, ${plural(info.late_by_days, 'day')} after its due date.\n${info.explanation}`,
+  'aria-label': `Projected ${plural(info.late_by_days, 'day')} late` }, `\u23F1 +${info.late_by_days}d`);
+const VERDICT = { will_miss: ['overdue', 'Projected late'], on_track: ['on_track', 'On track'], unknown: ['at_risk', 'Cannot be projected'], no_due_date: ['planning', 'No due date'] };
+const verdictBadge = (p) => (p.state === 'complete' ? badge('done', 'No open work') : p.state === 'not_projected' ? badge('on_hold', 'Not projected') : badge(...VERDICT[p.verdict]));
 const statusBadge = (s) => badge(s, STATUS_LABEL[s] || s);
 const priorityBadge = (p) => badge(p, PRIORITY_LABEL[p] || p);
 const healthBadge = (hl) => badge(hl.status, HEALTH_LABEL[hl.status], hl.reasons.join('\n'));
@@ -403,8 +412,11 @@ window.addEventListener('hashchange', route);
 function kpi(label, value, kind) { return h('div', { class: 'card kpi ' + (kind || '') }, h('div', { class: 'label', text: label }), h('div', { class: 'value', text: value })); }
 
 async function dashboardView(view, alive) {
-  const [portfolio, digest, workload] = await Promise.all([api('/reports/portfolio'), api('/reports/digest', { query: { days: 7 } }), api('/reports/workload')]);
+  let forecastError = null;
+  const [portfolio, digest, workload, forecast] = await Promise.all([api('/reports/portfolio'), api('/reports/digest', { query: { days: 7 } }), api('/reports/workload'),
+    api('/reports/projection').catch((e) => { forecastError = e.message; return null; })]); // the dashboard still works if the projection cannot be computed
   if (!alive()) return;
+  const projected = Object.fromEntries(((forecast && forecast.projects) || []).map((p) => [p.project, p]));
   clear(view);
   const t = portfolio.totals;
   const risky = (t.by_health.at_risk || 0) + (t.by_health.off_track || 0);
@@ -412,12 +424,20 @@ async function dashboardView(view, alive) {
     h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('h1', { text: 'Dashboard' }), h('p', { class: 'muted', text: `Portfolio overview as of ${fmtDate(portfolio.as_of)}` })),
       hasRole('manager') ? h('button', { class: 'btn primary', onclick: openCreateProject }, '+ New project') : null),
     h('div', { class: 'grid kpis' }, kpi('Projects', t.projects), kpi('Open tasks', t.open_tasks), kpi('Overdue tasks', t.overdue_tasks, t.overdue_tasks ? 'bad' : ''), kpi('At risk / off track', risky, risky ? 'warn' : '')),
-    h('div', { class: 'card flush', style: { marginTop: '16px' } }, portfolioTable(portfolio.projects)),
+    h('div', { class: 'card flush', style: { marginTop: '16px' } }, portfolioTable(portfolio.projects, projected),
+      forecastError ? h('p', { class: 'small muted', style: { margin: '10px 14px' }, id: 'projection-unavailable', text: `Projected finish is not available: ${forecastError}` }) : null),
     h('div', { class: 'grid two', style: { marginTop: '16px' } }, attentionCard(digest), workloadCard(workload)));
 }
-function portfolioTable(projects) {
+function projectedCell(p) {
+  if (!p || p.state !== 'projected') return '\u2014';
+  if (!p.finish) return h('span', { class: 'small muted', text: 'Cannot be projected' });
+  const note = p.late_by_days ? h('div', { class: 'small overdue-text', text: `${plural(p.late_by_days, 'day')} after the due date` })
+    : h('div', { class: 'small muted', text: p.due_date ? 'in time' : 'no due date' });
+  return [h('span', { text: fmtDate(p.finish) }), note, p.late_tasks ? h('div', { class: 'small overdue-text', text: `${plural(p.late_tasks, 'task')} will be late` }) : null];
+}
+function portfolioTable(projects, projected = {}) {
   if (!projects.length) return h('div', { class: 'empty', text: 'No projects yet. Create one to get started.' });
-  return h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['Project', 'Health', 'Progress', 'Open', 'Overdue', 'Next milestone', 'Due'].map((x) => h('th', { text: x })))),
+  return h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['Project', 'Health', 'Progress', 'Open', 'Overdue', 'Next milestone', 'Due', 'Projected finish'].map((x) => h('th', { text: x })))),
     h('tbody', {}, projects.map((p) => h('tr', { class: 'click', tabindex: 0, onclick: () => { location.hash = '#/p/' + p.key; }, onkeydown: (e) => { if (e.key === 'Enter') location.hash = '#/p/' + p.key; } },
       h('td', {}, h('strong', { text: p.name }), h('div', { class: 'small muted', text: `${p.key} \u00b7 ${PROJECT_STATUS_LABEL[p.status]} \u00b7 ${p.owner ? p.owner.display_name : 'no owner'}` })),
       h('td', {}, healthBadge(p.health)),
@@ -425,7 +445,8 @@ function portfolioTable(projects) {
       h('td', { text: p.open_tasks }),
       h('td', { class: p.overdue ? 'overdue-text' : '', text: p.overdue }),
       h('td', {}, p.next_milestone ? h('span', {}, p.next_milestone.name, ' ', badge(p.next_milestone.status === 'overdue' ? 'overdue' : 'open', fmtDate(p.next_milestone.due_date))) : '\u2014'),
-      h('td', { class: 'nowrap' }, p.due_date ? [fmtDate(p.due_date), p.days_remaining !== null ? h('div', { class: 'small ' + (p.days_remaining < 0 ? 'overdue-text' : 'muted'), text: p.days_remaining < 0 ? `${-p.days_remaining}d late` : `${p.days_remaining}d left` }) : null] : '\u2014')))));
+      h('td', { class: 'nowrap' }, p.due_date ? [fmtDate(p.due_date), p.days_remaining !== null ? h('div', { class: 'small ' + (p.days_remaining < 0 ? 'overdue-text' : 'muted'), text: p.days_remaining < 0 ? `${-p.days_remaining}d late` : `${p.days_remaining}d left` }) : null] : '\u2014'),
+      h('td', { class: 'nowrap' }, projectedCell(projected[p.key]))))));
 }
 function attentionCard(digest) {
   const items = digest.groups.flatMap((g) => [
@@ -666,6 +687,7 @@ function taskTable(tasks, opts = {}) {
     h('td', {}, t.title, t.parent ? h('span', { class: 'chip', style: { marginLeft: '6px' }, text: 'sub of ' + t.parent }) : null,
       t.blocked_by_open ? h('span', { class: 'chip', style: { marginLeft: '6px' }, title: 'Waiting on open tasks', text: '\u{1F512} ' + t.blocked_by_open }) : null,
       t.checklist.total ? h('span', { class: 'chip', style: { marginLeft: '6px' }, title: 'Checklist items done', text: `\u2713 ${t.checklist.done}/${t.checklist.total}` }) : null,
+      opts.late && opts.late[t.key] ? h('span', { style: { marginLeft: '6px' } }, lateChip(opts.late[t.key])) : null,
       t.labels.map((l) => h('span', { class: 'chip', style: { marginLeft: '6px' }, text: l }))),
     h('td', {}, statusBadge(t.status)), h('td', {}, priorityBadge(t.priority)),
     h('td', {}, h('div', { class: 'row' }, avatar(t.assignee), t.assignee ? h('span', { class: 'small', text: t.assignee.display_name }) : null)),
@@ -679,7 +701,11 @@ function taskTable(tasks, opts = {}) {
 const TABS = [['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline'], ['milestones', 'Milestones'], ['files', 'Files'], ['reports', 'Reports'], ['activity', 'Activity'], ['settings', 'Settings']];
 
 async function projectView(view, key, tab, alive) {
-  const [project, summary, fields] = await Promise.all([api('/projects/' + key), api(`/projects/${key}/summary`), api('/project-fields')]);
+    const [project, summary, fields, forecast] = await Promise.all([api('/projects/' + key), api(`/projects/${key}/summary`), api('/project-fields'),
+      api(`/projects/${key}/projection`).catch(() => null)]); // the project still opens if the projection cannot be computed
+  const late = {}; // task key -> the projection of a task that will miss its due date
+  const setLate = (f) => { for (const k of Object.keys(late)) delete late[k]; for (const t of (f && f.tasks) || []) if (t.late_by_days) late[t.key] = t; };
+  setLate(forecast);
   state.projectCache[key] = project;
   state.fields = fields.items; // another admin may have changed the definitions since sign-in
   if (!alive()) return;
@@ -700,11 +726,15 @@ async function projectView(view, key, tab, alive) {
       canWrite(project) ? h('button', { class: 'btn primary', onclick: () => openCreateTask(project) }, '+ New task') : null));
   };
   renderHeader(summary);
-  const refreshHeader = async () => renderHeader(await api(`/projects/${key}/summary`));
+  const refreshHeader = async () => {
+    const [s, f] = await Promise.all([api(`/projects/${key}/summary`), api(`/projects/${key}/projection`).catch(() => null)]);
+    setLate(f);
+    renderHeader(s);
+  };
   const body = h('div');
   view.append(headerBox, h('nav', { class: 'tabs', 'aria-label': 'Project sections' }, TABS.map(([id, label]) => h('a', { href: `#/p/${key}/${id}`, class: id === tab ? 'active' : '', 'aria-current': id === tab ? 'page' : null }, label))), body);
   const tabs = { board: boardTab, list: listTab, timeline: timelineTab, milestones: milestonesTab, files: filesTab, reports: reportsTab, activity: activityTab, settings: settingsTab };
-  await tabs[tab](body, { project, summary, key, refreshHeader, alive });
+  await tabs[tab](body, { project, summary, key, refreshHeader, alive, late });
   if (alive() && state.pendingTask) { const k = state.pendingTask; state.pendingTask = null; openTask(k); }
 }
 
@@ -729,6 +759,7 @@ async function boardTab(root, ctx) {
         t.subtasks.total ? h('span', { title: 'Subtasks done', text: `\u2611 ${t.subtasks.done}/${t.subtasks.total}` }) : null,
         t.checklist.total ? h('span', { title: 'Checklist items done', text: `\u2713 ${t.checklist.done}/${t.checklist.total}` }) : null,
         t.blocked_by_open ? h('span', { title: 'Waiting on open tasks', text: `\u{1F512} ${t.blocked_by_open}` }) : null,
+        ctx.late[t.key] && !['done', 'cancelled'].includes(t.status) ? lateChip(ctx.late[t.key]) : null,
         t.labels.slice(0, 2).map((l) => h('span', { class: 'chip', text: l }))));
     el.addEventListener('dragstart', (e) => {
       dragging = t; el.classList.add('dragging'); e.dataTransfer.setData('text/plain', t.key); e.dataTransfer.effectAllowed = 'move';
@@ -746,7 +777,7 @@ async function boardTab(root, ctx) {
       for (const col of data.columns) col.tasks = col.tasks.filter((x) => x.key !== task.key);
       data.columns.find((c) => c.status === updated.status).tasks.push(updated);
       toast(`${task.key} moved to ${STATUS_LABEL[status]}`, 'ok');
-      ctx.refreshHeader();
+      await ctx.refreshHeader(); // the projection of everything else may have changed too
     } catch (e) { toast(e.message, 'error'); }
     render();
   }
@@ -808,7 +839,7 @@ async function listTab(root, ctx) {
     const data = await api('/tasks', { query: { project: key, status: f.status, assignee: f.assignee, priority: f.priority, q: f.q, open: f.open ? 'true' : '', sort: f.sort, limit: LIMIT, offset: f.offset } });
     if (!ctx.alive()) return;
     clear(results);
-    results.append(taskTable(data.items, { sort: f.sort, onSort: (field) => { f.sort = f.sort === field ? '-' + field : field; f.offset = 0; load(); },
+    results.append(taskTable(data.items, { late: ctx.late, sort: f.sort, onSort: (field) => { f.sort = f.sort === field ? '-' + field : field; f.offset = 0; load(); },
       sortable: { Key: 'key', Title: 'title', Status: 'status', Priority: 'priority', Assignee: 'assignee', Due: 'due_date' },
       selection: bulk ? { selected, onChange: bulk.update } : null }));
     if (bulk) bulk.update();
@@ -990,7 +1021,8 @@ async function reportsTab(root, ctx) {
     put(burnBox, burndownChart(data), data.unestimated_tasks && metricSel.value === 'hours' ? h('p', { class: 'small muted', text: `${plural(data.unestimated_tasks, 'task')} without an estimate count as 0 hours.` }) : null);
   }
   root.append(
-    h('div', { class: 'grid kpis' }, kpi('Complete', `${Math.round(summary.progress.tasks_pct)}%`), kpi('Open tasks', m.open), kpi('Overdue', m.overdue, m.overdue ? 'bad' : ''), kpi('Due within 7 days', m.due_soon),
+    projectionCard(ctx),
+    h('div', { class: 'grid kpis', style: { marginTop: '16px' } }, kpi('Complete', `${Math.round(summary.progress.tasks_pct)}%`), kpi('Open tasks', m.open), kpi('Overdue', m.overdue, m.overdue ? 'bad' : ''), kpi('Due within 7 days', m.due_soon),
       kpi('Waiting / blocked', m.blocked, m.flagged_blocked ? 'warn' : ''), kpi('Unassigned', m.unassigned, m.unassigned ? 'warn' : ''),
       kpi('Hours logged', fmtHours(summary.hours.logged)), kpi('Est. remaining', fmtHours(summary.hours.remaining_estimate))),
     h('div', { class: 'card', style: { marginTop: '16px' } }, h('h2', { text: 'Tasks by status' }),
@@ -1001,6 +1033,81 @@ async function reportsTab(root, ctx) {
       h('div', { class: 'card' }, h('h2', { text: 'Workload for this project' }), h('p', { class: 'small muted', text: `Open work due in the next ${work.weeks} weeks vs capacity (across all projects)` }),
         work.items.filter((i) => i.open_tasks || i.scheduled_hours).map((i) => h('div', { class: 'item' }, avatar(i.user), h('span', { class: 'grow', text: i.user.display_name }), utilCell(i))))));
   await loadBurndown();
+}
+function projectionCard(ctx) {
+  const { key } = ctx;
+  const card = h('div', { class: 'card', id: 'projection' }, h('h2', { text: 'Delivery projection' }), h('p', { class: 'muted', text: 'Calculating\u2026' }));
+  const assume = { person: '', capacity: '100', overrun: '0', reassign: '' }; // reassign: "KEY-1:username", set by previewing a suggestion
+  let seq = 0, last = null;
+  async function load() {
+    const mine = ++seq;
+    const query = {};
+    if (assume.person && Number(assume.capacity) !== 100) query.capacity = `${assume.person}:${Number(assume.capacity)}`; // Number() turns "1e2" or ".5" into what the server expects
+    if (Number(assume.overrun) > 0) query.overrun = String(Number(assume.overrun));
+    if (assume.reassign) query.reassign = assume.reassign;
+    try {
+      const data = await api(`/projects/${key}/projection`, { query });
+      if (mine === seq && ctx.alive()) { last = data; draw(data); }
+    } catch (e) {
+      if (mine !== seq) return;
+      if (last) draw(last, e.message); // keep the last good answer and the form, and say what was wrong with the question
+      else { clear(card); put(card, h('h2', { text: 'Delivery projection' }), h('p', { class: 'error-text', role: 'alert', text: e.message })); }
+    }
+  }
+  async function loadAdvice(box, forLoad) {
+    let advice;
+    try { advice = await api(`/projects/${key}/projection/advice`); } catch (e) { advice = { error: e.message }; }
+    if (forLoad !== seq || !ctx.alive()) return; // the question has changed since: this answer is about an older picture
+    clear(box);
+    if (advice.error) { put(box, h('span', { class: 'muted', text: `Suggestions are not available: ${advice.error}` })); return; }
+    if (!advice.suggestions.length) { put(box, h('span', { class: 'muted', text: advice.reason || 'No suggestions.' })); return; }
+    put(box, h('strong', { text: 'What would help' }), advice.suggestions.map((s) => h('div', { class: 'item suggestion' },
+      h('div', { class: 'grow' }, h('div', { text: s.summary }),
+        h('div', { class: 'muted', text: `${s.to.display_name} has ${fmtHours(s.to.open_hours)} of other work${s.to.busy_until ? `, the last of it ending ${fmtDate(s.to.busy_until)}` : ''}.` })),
+      h('a', { href: '#/t/' + s.task, class: 'btn small', 'aria-label': `Open ${s.task}` }, 'Open'),
+      h('button', { class: 'btn small', type: 'button', 'aria-label': `Preview giving ${s.task} to ${s.to.display_name}`, onclick: () => { assume.reassign = s.reassign; load(); } }, 'Preview'))),
+      h('div', { class: 'muted', text: `Suggestions look only at capacity and queues, not at skills. ${advice.limited ? 'Only some reassignments were tried. ' : ''}Nothing is changed until you reassign the task yourself.` }));
+  }
+  function draw(data, problem) {
+    clear(card);
+    const people = data.people;
+    const personSel = h('select', { 'aria-label': 'Person whose availability changes', value: assume.person, onchange: (e) => { assume.person = e.target.value; capacity.required = !!assume.person; } },
+      optionList([['', 'Nobody in particular'], ...people.map((p) => [p.username, p.display_name])]));
+    const capacity = h('input', { type: 'number', min: 0, max: 200, step: 1, required: !!assume.person, 'aria-label': 'Availability in percent', value: assume.capacity, style: { width: '84px' }, oninput: (e) => { assume.capacity = e.target.value; } });
+    const overrun = h('input', { type: 'number', min: 0, max: 300, step: 1, 'aria-label': 'Estimates overrun in percent', value: assume.overrun, style: { width: '84px' }, oninput: (e) => { assume.overrun = e.target.value; } });
+    const active = !!data.scenario;
+    const late = data.tasks.filter((t) => t.late_by_days || t.state !== 'scheduled');
+    const adviceBox = h('div', { id: 'projection-advice', class: 'small', style: { marginTop: '12px' } }, h('span', { class: 'muted', text: 'Looking for a way to fix it\u2026' }));
+    const needsFix = !active && (data.counts.late_tasks > 0 || ['will_miss', 'unknown'].includes(data.verdict));
+    if (needsFix) loadAdvice(adviceBox, seq);
+    put(card, h('div', { class: 'row wrap' }, h('h2', { text: 'Delivery projection' }), verdictBadge(data)),
+      h('p', { id: 'projection-headline', text: data.headline }),
+      active ? h('p', { class: 'small', id: 'projection-scenario' }, h('strong', { text: 'With these assumptions: ' }),
+        data.scenario.reassign.length ? `${data.scenario.reassign.map((m) => `${m.task} goes to ${m.to_name}`).join(', ')}; ` : '',
+        data.scenario.finish_moves_by_days === null ? 'the finish cannot be compared.' : data.scenario.finish_moves_by_days === 0 ? 'the finish does not move' : `the finish moves ${data.scenario.finish_moves_by_days > 0 ? 'later' : 'earlier'} by ${plural(Math.abs(data.scenario.finish_moves_by_days), 'day')}`,
+        data.scenario.extra_late_tasks ? `, and ${plural(Math.abs(data.scenario.extra_late_tasks), 'task')} ${data.scenario.extra_late_tasks > 0 ? 'more' : 'fewer'} will be late.` : '.') : null,
+      late.length ? h('div', { class: 'scroll-x' }, h('table', { class: 'table', 'aria-label': 'Tasks projected to be late' }, h('thead', {}, h('tr', {}, ['Task', 'Who', 'Due', 'Projected', 'Late by', 'Why'].map((x) => h('th', { text: x })))),
+        h('tbody', {}, late.slice(0, 10).map((t) => h('tr', {}, h('td', {}, h('a', { href: '#/t/' + t.key }, h('strong', { text: t.key })), ' ', t.title),
+          h('td', { text: t.assignee || '\u2014' }), h('td', { class: 'nowrap', text: fmtDate(t.due_date) }), h('td', { class: 'nowrap', text: t.projected_finish ? fmtDate(t.projected_finish) : '\u2014' }),
+          h('td', { class: 'nowrap overdue-text', text: t.late_by_days ? `+${t.late_by_days}d` : 'n/a' }), h('td', { class: 'small why', text: t.explanation })))))) : null,
+      late.length > 10 ? h('p', { class: 'small muted', text: `\u2026and ${late.length - 10} more` }) : null,
+      data.milestones.some((m) => m.late_by_days) ? h('div', { class: 'small', style: { marginTop: '8px' } }, h('strong', { text: 'Milestones at risk: ' }),
+        data.milestones.filter((m) => m.late_by_days).map((m) => `${m.name} (due ${fmtDate(m.due_date)}, projected ${fmtDate(m.projected_finish)})`).join('; ')) : null,
+      needsFix ? adviceBox : null,
+      people.length ? h('div', { style: { marginTop: '10px' } }, h('div', { class: 'small muted', text: 'Who is carrying the work (busy until counts every project):' }),
+        people.map((p) => h('div', { class: 'item' }, h('span', { class: 'grow', text: p.display_name + (p.capacity_pct !== 100 ? ` (${p.capacity_pct}% available)` : '') }),
+          h('span', { class: 'small muted nowrap', text: `${fmtHours(p.open_hours)} open \u00b7 ${p.hours_per_day}h a day` }),
+          h('span', { class: 'small nowrap ' + (p.late_tasks ? 'overdue-text' : ''), text: p.busy_until ? `busy until ${fmtDate(p.busy_until)}` : '' })))) : null,
+      problem ? h('p', { class: 'error-text', role: 'alert', id: 'projection-error', text: problem }) : null,
+      h('form', { class: 'row wrap whatif', style: { marginTop: '12px' }, onsubmit: (e) => { e.preventDefault(); load(); } }, h('strong', { class: 'small', text: 'What if\u2026' }),
+        personSel, h('span', { class: 'small', text: 'is available' }), capacity, h('span', { class: 'small', text: '% and estimates overrun by' }), overrun, h('span', { class: 'small', text: '%' }),
+        h('button', { class: 'btn small primary', type: 'submit' }, 'Recalculate'),
+        h('button', { class: 'btn small', type: 'button', onclick: () => { Object.assign(assume, { person: '', capacity: '100', overrun: '0', reassign: '' }); load(); } }, 'Reset')),
+      h('details', { class: 'small', style: { marginTop: '10px' } }, h('summary', { text: 'How this is worked out' }), h('ul', { class: 'reasons' }, data.assumptions.notes.map((n) => h('li', { text: n })),
+        h('li', { text: `Work days: ${data.assumptions.work_days}.` }))));
+  }
+  load();
+  return card;
 }
 function burndownChart(data) {
   const W = 760, H = 270, L = 44, R = 16, T = 14, B = 34;
@@ -1224,7 +1331,7 @@ async function openTask(key) {
   const project = await getProject(task.project);
   const milestones = (await api(`/projects/${task.project}/milestones`)).items;
   const editable = canWrite(project);
-  let dirty = false, comments = [], time = [], acts = [], files = { items: [], total_bytes: 0, limits: null }, uploading = false, uploadNote = '';
+  let dirty = false, comments = [], time = [], acts = [], files = { items: [], total_bytes: 0, limits: null }, uploading = false, uploadNote = '', forecast = null;
   // Typed-but-unsent text survives the re-render that follows every saved field change.
   const drafts = { description: null, comment: '', subtask: '', depKey: '', depDir: 'blocked_by', depType: 'finish_to_start', depLag: '', linkKey: '', linkType: 'relates_to', checkText: '', watcher: '', hours: '', day: state.today, note: '' };
   const track = (name) => (e) => { drafts[name] = e.target.value; };
@@ -1238,9 +1345,10 @@ async function openTask(key) {
   async function loadAll() {
     const mine = ++loadSeq;
     const fresh = await Promise.all([api('/tasks/' + key), api(`/tasks/${key}/comments`).then((r) => r.items), api(`/tasks/${key}/time`).then((r) => r.items), api(`/tasks/${key}/activity`, { query: { limit: 15 } }).then((r) => r.items),
-      api(`/tasks/${key}/attachments`)]);
-    if (mine !== loadSeq) return; // a newer load is in flight: an older response must never overwrite newer state
-    [task, comments, time, acts, files] = fresh;
+        api(`/tasks/${key}/attachments`),
+        api(`/projects/${task.project}/projection`).then((r) => r.tasks.find((t) => t.key === key) || null).catch(() => null)]); // the dialog still works without it
+      if (mine !== loadSeq) return; // a newer load is in flight: an older response must never overwrite newer state
+      [task, comments, time, acts, files, forecast] = fresh;
     render();
   }
   async function patch(change) {
@@ -1279,7 +1387,7 @@ async function openTask(key) {
         task.blocked_by_open ? badge('blocked', `Waiting on ${task.blocked_by_open}`) : null, h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', 'aria-label': 'Close', onclick: () => handle.close() }, '\u2715')),
       project.status === 'archived' ? h('p', { class: 'small muted', text: 'This project is archived, so its tasks are read-only.' }) : !editable ? h('p', { class: 'small muted', text: 'You have read-only access to this task.' }) : null,
       h('div', { class: 'task-layout' }, h('div', {}, title, h('div', { class: 'stack', style: { marginTop: '8px' } }, desc, saveDesc),
-        checklistSection(), attachmentsSection(), subtasksSection(), dependenciesSection(), linksSection(), timeSection(), commentsSection(), activitySection()), side));
+        checklistSection(), attachmentsSection(), projectionSection(), subtasksSection(), dependenciesSection(), linksSection(), timeSection(), commentsSection(), activitySection()), side));
   }
 
   async function switchTo(otherKey) { handle.close(); openTask(otherKey); }
@@ -1291,6 +1399,17 @@ async function openTask(key) {
       else throw e;
     }
     dirty = true; handle.close(); toast(`${task.key} deleted`, 'ok');
+  }
+
+  function projectionSection() {
+    if (!forecast || task.status === 'done' || task.status === 'cancelled') return null;
+    const f = forecast;
+    const when = f.projected_finish ? `Projected to finish ${fmtDay(f.projected_finish)}` : 'Cannot be projected';
+    const verdict = f.late_by_days ? h('span', { class: 'overdue-text', text: ` \u2014 ${plural(f.late_by_days, 'day')} after its due date` })
+      : f.margin_days !== null && f.projected_finish ? h('span', { class: 'muted', text: f.margin_days === 0 ? ' \u2014 on its due date' : ` \u2014 ${plural(f.margin_days, 'day')} before its due date` }) : null;
+    return h('div', { class: 'section', id: 'projection-section' }, h('h3', { text: 'Projection' }),
+      h('div', {}, h('strong', { text: when }), verdict), h('p', { class: 'small', text: f.explanation }),
+      f.notes.length ? h('ul', { class: 'reasons' }, f.notes.map((n) => h('li', { text: n }))) : null);
   }
 
   function subtasksSection() {

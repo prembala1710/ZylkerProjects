@@ -170,6 +170,29 @@ def render_digest(report: dict, public_url: str = "") -> str:
     return "\n".join(lines)[:MAX_MESSAGE]
 
 
+def render_projection(report: dict, public_url: str = "") -> str:
+    """The early-warning message built by ``projection.early_warning`` (user text is stripped of Cliq markup, like everywhere else)."""
+    lines = ["\u23f1 *Delivery projection for %s*" % report["as_of"]]
+    if not report["projects"]:
+        lines.append("Everything is projected to finish on time. \U0001f389")
+    for project in report["projects"]:
+        icon = "\U0001f534" if project["verdict"] == "will_miss" else "\U0001f7e1"
+        lines.append("\n%s *%s* (%s) \u2014 %s" % (icon, _clean(project["name"]), project["project"], _clean(project["headline"])))
+        for t in project["tasks"]:
+            if t["projected_finish"]:
+                timing = "due %s, projected %s" % (t["due_date"] or "no date", t["projected_finish"]) + (" (+%dd)" % t["late_by_days"] if t["late_by_days"] else "")
+            else:
+                timing = "cannot be scheduled"
+            lines.append("  \u2022 %s \u2014 %s. %s" % (_task(t["key"], t["title"], public_url), timing, _clean(t["explanation"])))
+        if project["more"]:
+            lines.append("  \u2026and %d more" % project["more"])
+        if project.get("advice"):
+            lines.append("  \U0001f4a1 %s" % _clean(project["advice"]["summary"]))
+    if report["on_track"]:
+        lines.append("\n\U0001f7e2 On track: %s" % ", ".join(_clean(p["name"]) for p in report["on_track"]))
+    return "\n".join(lines)[:MAX_MESSAGE]
+
+
 def dispatch(notifier: Notifier, events, public_url: str = "") -> None:
     for event, payload in events:
         try:
