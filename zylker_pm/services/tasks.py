@@ -17,10 +17,11 @@ from ..domain import (
     STATUSES,
     TASK_TYPES,
     TRANSITIONS,
+    UNMET_DEPENDENCY_SQL,
 )
 from ..errors import Conflict, ValidationError
 from ..util import Checker, escape_like, parse_date, parse_task_key, truthy
-from . import activity, graph, projects, taskrefs, users
+from . import activity, checklist, graph, links, projects, taskrefs, users, watchers
 
 TASK_FIELDS = {
     "title", "description", "type", "status", "priority", "assignee", "parent", "milestone",
@@ -37,7 +38,11 @@ TASK_SELECT = (
     "(SELECT COUNT(*) FROM tasks c WHERE c.parent_id = t.id AND c.status = 'done') AS child_done, "
     "(SELECT COUNT(*) FROM tasks c WHERE c.parent_id = t.id AND c.status IN " + OPEN_SQL + ") AS child_open, "
     "(SELECT COUNT(*) FROM task_dependencies d JOIN tasks b ON b.id = d.blocker_id "
-    "WHERE d.blocked_id = t.id AND b.status IN " + OPEN_SQL + ") AS blocked_by_open, "
+    "WHERE d.blocked_id = t.id AND " + UNMET_DEPENDENCY_SQL + ") AS blocked_by_open, "
+    "(SELECT COUNT(*) FROM task_checklist_items ci WHERE ci.task_id = t.id) AS checklist_total, "
+    "(SELECT COUNT(*) FROM task_checklist_items ci WHERE ci.task_id = t.id AND ci.done = 1) AS checklist_done, "
+    "(SELECT COUNT(*) FROM task_watchers w JOIN users wu ON wu.id = w.user_id "
+    "WHERE w.task_id = t.id AND wu.active = 1) AS watcher_count, "
     "(SELECT group_concat(l.label, ',') FROM task_labels l WHERE l.task_id = t.id) AS labels_csv "
     "FROM tasks t JOIN projects p ON p.id = t.project_id "
     "LEFT JOIN users a ON a.id = t.assignee_id "
@@ -88,6 +93,8 @@ def to_dict(row, today_iso):
         "external_ref": row["external_ref"],
         "subtasks": {"total": row["child_total"], "done": row["child_done"], "open": row["child_open"]},
         "blocked_by_open": row["blocked_by_open"],
+        "checklist": {"total": row["checklist_total"], "done": row["checklist_done"]},
+        "watcher_count": row["watcher_count"],
         "is_overdue": bool(due) and row["status"] in OPEN_STATUSES and due < today_iso,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -113,22 +120,34 @@ def get_task(ctx, key, detail=True):
         return task
     conn = ctx.conn
 
-    def link_rows(sql):
-        return [
-            {"key": "%s-%d" % (r["project_key"], r["number"]), "title": r["title"], "status": r["status"]}
-            for r in conn.execute(sql, (row["id"],))
-        ]
+    def dependency_rows(sql):
+        """Each entry says which task, the dependency type and lag, and what the dates already imply."""
+        out = []
+        for r in conn.execute(sql, (row["id"],)):
+            blocker_dates, blocked_dates = (r["o_start"], r["o_due"]), (row["start_date"], row["due_date"])
+            if r["direction"] == "blocks":
+                blocker_dates, blocked_dates = blocked_dates, blocker_dates
+            out.append({
+                "key": "%s-%d" % (r["project_key"], r["number"]),
+                "title": r["title"],
+                "status": r["status"],
+                "type": r["type"],
+                "lag_days": r["lag_days"],
+                "schedule": graph.schedule_hint(r["type"], r["lag_days"], *blocker_dates, *blocked_dates),
+            })  # fmt: skip
+        return out
 
-    task["blocked_by"] = link_rows(
-        "SELECT b.number, b.title, b.status, p.key AS project_key FROM task_dependencies d "
-        "JOIN tasks b ON b.id = d.blocker_id JOIN projects p ON p.id = b.project_id "
-        "WHERE d.blocked_id = ? ORDER BY b.number"
+    base = (
+        "SELECT o.number, o.title, o.status, o.start_date AS o_start, o.due_date AS o_due, d.type, d.lag_days, "
+        "p.key AS project_key, '%s' AS direction FROM task_dependencies d JOIN tasks o ON o.id = d.%s "
+        "JOIN projects p ON p.id = o.project_id WHERE d.%s = ? ORDER BY o.number"
     )
-    task["blocks"] = link_rows(
-        "SELECT b.number, b.title, b.status, p.key AS project_key FROM task_dependencies d "
-        "JOIN tasks b ON b.id = d.blocked_id JOIN projects p ON p.id = b.project_id "
-        "WHERE d.blocker_id = ? ORDER BY b.number"
-    )
+    task["blocked_by"] = dependency_rows(base % ("blocked_by", "blocker_id", "blocked_id"))
+    task["blocks"] = dependency_rows(base % ("blocks", "blocked_id", "blocker_id"))
+    task["links"] = links.list_for(conn, row["id"])
+    task["checklist_items"] = checklist.list_for(conn, row["id"])
+    task["watchers"] = watchers.list_for(conn, row["id"])
+    task["watching"] = ctx.user is not None and watchers.is_watching(conn, row["id"], ctx.user["id"])
     task["subtask_list"] = [
         {
             "key": "%s-%d" % (row["project_key"], r["number"]),
@@ -247,13 +266,24 @@ def _check_transition(ctx, row, new):
             details={"from": old, "to": new, "allowed": list(TRANSITIONS[old])},
         )
     if new in BLOCKER_GATED_STATUSES:
-        blockers = graph.open_blockers(ctx.conn, row["id"])
+        blockers = graph.blocking_links(ctx.conn, row["id"], new)
         if blockers:
             keys = ["%s-%d" % (b["project_key"], b["number"]) for b in blockers]
+            if all(b["type"] == "finish_to_start" for b in blockers):
+                message = "%s is blocked by unfinished task(s): %s" % (taskrefs.key_of(row), ", ".join(keys))
+            else:
+                reason = {
+                    "finish_to_start": "must finish first",
+                    "start_to_start": "must start first",
+                    "finish_to_finish": "must finish before this can finish",
+                }
+                message = "%s is waiting on task(s): %s" % (
+                    taskrefs.key_of(row), ", ".join("%s (%s)" % (k, reason[b["type"]]) for k, b in zip(keys, blockers, strict=True)),
+                )
             raise Conflict(
-                "%s is blocked by unfinished task(s): %s" % (taskrefs.key_of(row), ", ".join(keys)),
+                message,
                 code="blocked_by_open_tasks",
-                details={"blockers": keys},
+                details={"blockers": keys, "links": [{"task": k, "type": b["type"]} for k, b in zip(keys, blockers, strict=True)]},
             )
     if new in CLOSED_STATUSES:
         open_children = ctx.conn.execute(
@@ -427,8 +457,8 @@ def update_task(ctx, key, data):
                         "Parent %s is closed. Reopen it first." % taskrefs.key_of(new_parent), code="parent_closed"
                     )
                 _check_depth(ctx, new_parent, graph.subtree_height(conn, row["id"]))
-                remove = [(row["id"], row["parent_id"])] if row["parent_id"] else []
-                cycle = graph.find_cycle(conn, row["project_id"], [(row["id"], new_parent["id"])], remove)
+                remove = [(row["id"], row["parent_id"], graph.HIERARCHY)] if row["parent_id"] else []
+                cycle = graph.find_cycle(conn, row["project_id"], [(row["id"], new_parent["id"], graph.HIERARCHY)], remove)
                 if cycle:
                     raise _cycle_error(ctx, cycle)
             old_parent = taskrefs.get_row_by_id(conn, row["parent_id"]) if row["parent_id"] else None
@@ -463,6 +493,7 @@ def update_task(ctx, key, data):
         ctx, action, project_id=row["project_id"], task_id=row["id"], task_key=task_key, details={"changes": changes}
     )
     title = updates.get("title", row["title"])
+    first_event = len(ctx.events)
     if new_assignee is not None and new_assignee["id"] != ctx.actor_id:
         _emit_assigned(
             ctx, task_key, title, new_assignee,
@@ -473,7 +504,28 @@ def update_task(ctx, key, data):
             "task_status", key=task_key, title=title, old=changes["status"][0],
             new=changes["status"][1], actor=ctx.actor_name,
         )  # fmt: skip
+    # Watchers are named in the message about this change; if no other message covers it, they get their own.
+    watching = watchers.names_to_notify(ctx, row["id"], exclude=(new_assignee["id"],) if new_assignee is not None else ())
+    if watching:
+        if len(ctx.events) > first_event:
+            ctx.events[first_event][1]["watchers"] = watching
+        else:
+            ctx.emit(
+                "task_watched", key=task_key, title=title, actor=ctx.actor_name, watchers=watching,
+                summary=describe_changes(changes),
+            )  # fmt: skip
     return get_task(ctx, key)
+
+
+def describe_changes(changes):
+    """One short line for chat: ``status: todo -> done; due date: none -> 2026-10-20``."""
+
+    def show(value):
+        if isinstance(value, list):
+            return ", ".join(value).replace("_", " ") or "none"
+        return "none" if value is None else str(activity.diff_value(value)).replace("_", " ")
+
+    return "; ".join("%s: %s \u2192 %s" % (name.replace("_", " "), show(old), show(new)) for name, (old, new) in changes.items())
 
 
 # ------------------------------------------------------------------------------ delete
@@ -556,6 +608,16 @@ def build_filters(ctx, params):
         where.append("t.status IN " + CLOSED_SQL)
     _user_condition(ctx, params, "assignee", where, args)
     _user_condition(ctx, params, "reporter", where, args)
+    for item in _csv(params, "watcher"):
+        if item == "me" and ctx.user is not None:
+            where.append("EXISTS (SELECT 1 FROM task_watchers w WHERE w.task_id = t.id AND w.user_id = ?)")
+            args.append(ctx.user["id"])
+        else:
+            where.append(
+                "EXISTS (SELECT 1 FROM task_watchers w JOIN users wu ON wu.id = w.user_id "
+                "WHERE w.task_id = t.id AND wu.username = ?)"
+            )
+            args.append(item)
     labels = [x.lower() for x in _csv(params, "label")]
     if labels:
         where.append(

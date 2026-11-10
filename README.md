@@ -11,8 +11,14 @@ standard library alone - **no packages to install, no build step** - and stores 
   and time logging.
 - **A workflow that enforces itself** - allowed status moves are defined once; a task cannot start or finish while a blocking task
   is open, and a parent cannot close while subtasks are open. The UI shows *why* a move was refused.
-- **Dependencies with deadlock protection** - "blocked by" links between tasks of a project. Loops are refused, including the
+- **Dependencies with deadlock protection** - "blocked by" links between tasks of a project: finish-to-start, start-to-start or
+  finish-to-finish, each with an optional lag or lead in days (see [Dependencies](#dependencies)). Loops are refused, including the
   sneaky kind that run through parent/subtask relationships.
+- **Checklists, watchers and related tasks** - lightweight tick-box items inside a task, people who follow a task without being its
+  assignee, and "relates to" / "duplicates" / "cloned from" links that never block anything (see
+  [Checklists, watchers and links](#checklists-watchers-and-links)).
+- **Bulk actions** - tick tasks in the List view and change their status, assignee, priority, labels, milestone or due date in one go;
+  anything the server refuses is listed with the reason (see [Bulk actions](#bulk-actions)).
 - **Boards, lists and a timeline** - drag-and-drop Kanban board, sortable/filterable list, and a Gantt-style timeline with
   milestones and the critical path highlighted.
 - **Health you can trust** - every project gets an on-track / at-risk / off-track status with the *reasons* spelled out
@@ -25,7 +31,11 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **Burndown, critical path, timesheets, digests** - computed live from the data.
 - **Roles and an audit trail** - viewer / member / manager / admin, per-project membership, and a field-level history of every change.
 - **Zoho Cliq notifications** (optional) - assignments, completions, blockers, @mentions and a scheduled overdue digest.
+- **File attachments** - attach screenshots, specs and logs to a task (pick, drop or paste), preview images, and find every file of a
+  project on its Files tab; files live inside the database, so a backup captures them (see [File attachments](#file-attachments)).
 - **CSV import / export** - bring in a Jira-style export (with a dry run) or take your data out.
+- **Custom project fields** - admins define extra text, number and URL fields (a client, a budget, a wiki link); managers fill them in
+  per project (see [Custom project fields](#custom-project-fields)).
 
 ## Quick start
 
@@ -44,7 +54,8 @@ The same commands are available as `zylker-pm ...` after `pip install .`. Everyt
 | Command | Purpose |
 |---|---|
 | `zylker-pm init [--admin USER --name NAME --email E]` | Create the database; optionally create the first admin and print its token |
-| `zylker-pm serve [--host H --port P]` | Run the web UI and API (threaded; logs one line per request, never headers or tokens) |
+| `zylker-pm serve [--host H --port P] [--no-webhook-worker]` | Run the web UI and API (threaded; logs one line per request, never headers or tokens). Also delivers outbound webhooks unless told not to |
+| `zylker-pm webhooks-worker [--once]` | Deliver queued outbound webhooks without serving HTTP (for gunicorn / waitress deployments); `--once` delivers what is due and exits |
 | `zylker-pm create-user USER --role member --name "..." [--capacity 30]` | Add a person and print their token |
 | `zylker-pm rotate-token USER` | Issue a new token; the old one stops working immediately |
 | `zylker-pm digest [--days 3] [--project KEY] [--post]` | Print the overdue / due-soon digest; `--post` sends it to Cliq |
@@ -64,10 +75,74 @@ All settings are environment variables; nothing is read from the repository.
 | `ZYLKER_DB` | `zylker.db` | SQLite file |
 | `ZYLKER_HOST` | `127.0.0.1` | Listen address. Anything other than loopback prints a warning: put a TLS-terminating reverse proxy in front |
 | `ZYLKER_PORT` | `8080` | Listen port |
+| `ZYLKER_ATTACHMENT_MAX_MB` | `10` | Largest single attachment in megabytes (fractions allowed, at most 100). An upload is held in memory while it is stored |
+| `ZYLKER_ATTACHMENT_QUOTA_MB` | `2048` | Total size of all attachments. Further uploads are refused until files are deleted. `0` means unlimited |
 | `ZYLKER_TIMEZONE` | `UTC` | IANA name, e.g. `Asia/Kolkata`. Decides what "today" is for overdue checks, digests and burndown days. Timestamps are always stored in UTC |
 | `ZYLKER_PUBLIC_URL` | *(empty)* | Public base URL (`https://pm.example.com`); makes task keys in Cliq messages clickable |
 | `ZYLKER_CLIQ_ENDPOINT` | *(empty = notifications off)* | A Cliq **incoming webhook URL**. It contains a key - treat it as a secret. Must be `https` (plain `http` only for localhost) |
 | `ZYLKER_CLIQ_BOT_UNIQUE_NAME` | *(empty)* | Post as this bot (appended as `bot_unique_name`, the same convention as the repository's GitHub Informer workflow) |
+
+## Custom project fields
+
+Every organisation has different things it wants to know about a project. Admins define **fields** under *Admin -> Project fields*
+(or `POST /api/project-fields`); every project then carries a value for each one, edited by managers on the project's *Settings* tab
+and shown in the project header. At most 20 fields.
+
+| Type | Holds | Rules you can set |
+|---|---|---|
+| **Text** | One line of text | Maximum length (1-2000, default 255) |
+| **Number** | Integers or decimals | Decimal places (0-3, default 2), optional minimum and maximum |
+| **URL** | A web address | `http://` or `https://` only |
+
+- **Strict, server-side validation.** Wrong types, control characters, too many decimal places (refused, never rounded), values outside
+  the range, and any URL that is not plain `http(s)` with a host name - `javascript:`, `data:`, `//host`, embedded passwords,
+  backslashes, spaces - are all rejected with a per-field message. The browser checks the same rules first for instant feedback.
+- **Safe display.** Values are inserted as text; a URL becomes a link (opening in a new tab with `rel="noopener noreferrer nofollow"`) only
+  if it is `http(s)`.
+- **Required fields** must be filled in when a project is created and can never be cleared. Projects that existed before the field was
+  made required stay editable until someone fills it in.
+- **Safe changes.** The key and type of a field are permanent. A limit cannot be tightened past values projects already hold, and deleting
+  a field needs the key typed back because it removes that value from every project.
+- **Audited.** Value changes appear in the project's activity feed (`Client: Acme -> Beta`); definition changes in the admin audit trail.
+- **Searchable.** The project search box also matches text and URL values.
+
+Databases created by an earlier release are upgraded automatically the first time they are opened (schema v1 to v3, one transaction per step;
+a failed upgrade changes nothing).
+
+## Checklists, watchers and links
+
+**Checklists.** A task can carry up to 50 checklist items: text and a tick box, in an order you can change (Task dialog -> *Checklist*). Use them for
+the small steps that do not deserve a task of their own. They are deliberately *not* part of the workflow: unticked items never stop a task being closed and
+ticking everything does not close it. When a step needs an owner, a due date or a gate, make it a subtask. Lists and the board show progress as `2/5`.
+
+**Watchers.** *Watch* a task (Task dialog, right-hand side) to follow it without being the assignee. Anyone signed in, viewers included, can follow or
+unfollow themselves; adding other people needs write access to the project. When a watched task changes or gets a comment, the Zoho Cliq message about it ends
+with `Watching: ...` naming the followers - the webhook posts to one channel, so this is a mention by name, not a private message, and the person who made the
+change is never named. The task list filter `watcher=me` shows everything you follow.
+
+**Related tasks.** *Relates to*, *duplicates* / *is duplicated by* and *is cloned from* / *was cloned to* connect tasks for reference, even across projects (you need
+write access to both). They never block anything, take no part in deadlock checks and do not affect health. Two tasks can have one link between them.
+
+## Dependencies
+
+A dependency makes one task (the *blocked* one) wait for another (the *blocker*), and has a type:
+
+| Type | The blocked task cannot... | until the blocker... |
+|---|---|---|
+| **Finish -> Start** (default) | start | is finished |
+| **Start -> Start** | start | has started |
+| **Finish -> Finish** | finish (it may start earlier) | is finished |
+
+*Lag* (days, positive) and *lead* (negative) say when the dates *should* fall, for example "start 2 days after the blocker finishes". They never move a task and never block a
+status change; the task dialog flags a link with a warning when the planned dates already break it. Cancelled and done blockers never hold anybody up. Existing dependencies
+become plain finish-to-start links with no lag. The critical path (effort hours, not dates) follows finish-to-start links only.
+
+## Bulk actions
+
+In a project's *List* tab, tick tasks (or the header box for the whole page) and use the bar that appears: pick what to change - status, priority, assignee, milestone,
+due date, add a label, remove a label - and *Apply*. Every task goes through the same rules as editing it alone, so refused tasks (a blocked task, a member who is not in
+the project, an archived project...) are listed with the reason and the others are saved. The same call is available as `POST /api/tasks/bulk` with up to 100 tasks, several
+fields at once and an optional all-or-nothing mode (see `docs/API.md`). Cliq gets one summary message, not one per task.
 
 ## Roles
 
@@ -76,7 +151,7 @@ All settings are environment variables; nothing is read from the repository.
 | **viewer** | Read everything: projects, tasks, reports, exports |
 | **member** | Viewer + create/edit tasks, comment, log time and link dependencies **in projects they belong to** |
 | **manager** | Member + everything in *any* project: create and edit projects, manage members and milestones, delete tasks, import CSV, see everyone's timesheet |
-| **admin** | Manager + manage users and roles, delete projects, read the global audit trail |
+| **admin** | Manager + manage users and roles, define custom project fields, delete projects, read the global audit trail |
 
 Project membership also controls who can be *assigned* work. Archived projects are read-only for all roles.
 The server is the authority: the UI hides controls a role cannot use, but every rule is enforced in the API.
@@ -85,15 +160,17 @@ The server is the authority: the UI hides controls a role cannot use, but every 
 
 **Workflow.** `todo -> in_progress -> in_review -> done`, plus `blocked` and `cancelled`; done and cancelled tasks can be
 reopened to `todo` (and done to `in_progress`). The complete map is returned by `GET /api/meta`. Moving a task to
-`in_progress`, `in_review` or `done` is refused while any of its blockers is open (done or cancelled blockers do not block).
+`in_progress`, `in_review` or `done` is refused while a dependency still holds it back - by default a blocker that is not finished; start-to-start
+and finish-to-finish dependencies hold back less (see [Dependencies](#dependencies)). Done or cancelled blockers never block.
 Setting a task to `blocked` is always allowed - it is the manual "waiting on something outside the system" flag.
 
 **Hierarchy.** Subtasks nest up to five levels. A parent cannot be closed while a subtask is open, an open subtask cannot be
 added under (or reopened beneath) a closed parent, and deleting a parent needs `?cascade=true`.
 
-**Dependencies.** Finish-to-start, same project only. A *deadlock* is a cycle in the combined graph of dependencies and
-"child must finish before parent". Checking the combined graph is what catches `parent -> X -> child` loops: a parent can
-never be made to wait for its own subtask. The refusal names the loop, e.g. `WEB-3 -> WEB-1 -> WEB-2 -> WEB-3`.
+**Dependencies.** Same project only. A *deadlock* is a cycle in the combined graph of dependencies and "child must finish before
+parent". The graph is built from *start* and *finish* events of each task, so the three dependency types combine correctly (B starts after A starts
+while A finishes after B finishes is fine; A finishes before B starts while B starts before A starts is not). Checking the combined graph is what
+catches `parent -> X -> child` loops: a parent can never be made to wait for its own subtask. The refusal names the loop, e.g. `WEB-3 -> WEB-1 -> WEB-2 -> WEB-3`.
 
 **Auditability.** Every create, update, status change, link, comment and time entry is recorded with who and when; edits store
 old and new values.
@@ -196,6 +273,8 @@ Cliq outage never fails a request, and nothing is sent for a request that was ro
 - a task is assigned to someone other than the person who assigned it
 - a task is completed, or marked blocked
 - someone is `@mentioned` in a comment
+- a task someone watches changes or is commented on (the message names the watchers)
+- a bulk action changes several tasks (one summary message, not one per task)
 - a project's status changes
 - the digest, when you run `zylker-pm digest --post`
 - the delivery projection, with a suggested fix for the worst projects, when you run `zylker-pm projection --post`
@@ -209,6 +288,47 @@ Schedule the digest with whatever you already use, for example cron on weekdays 
 Task titles are stripped of Cliq markup before posting, so a title cannot inject links, bold text or mentions into a channel.
 Delivery is covered by tests against a local stand-in server, **not** against live Cliq: after configuring, run
 `zylker-pm digest --post` once and check the channel.
+
+## Outbound webhooks
+
+Webhooks let other systems react to what happens here: a build server, a chat relay, a spreadsheet, another Zylker. An admin adds
+one under **Webhooks** in the sidebar (or with `POST /api/webhooks`), chooses the events and, optionally, the projects, and the
+server sends a signed JSON `POST` for every matching change:
+
+```json
+{"id": "evt_412", "event": "task.status_changed", "created_at": "2026-10-16T09:00:00Z",
+ "project": {"key": "WEB", "name": "Website Redesign"},
+ "task": {"key": "WEB-5", "title": "Homepage layout", "status": "in_review", "priority": "high", "type": "task", "assignee": "bob", "due_date": "2026-10-30"},
+ "actor": {"username": "alice", "display_name": "Alice Morgan"},
+ "details": {"changes": {"status": ["in_progress", "in_review"]}}}
+```
+
+- **No lost events, no phantom ones.** An event is written to a queue in the same database transaction as the change it describes, so a
+  request that fails or rolls back announces nothing and one that succeeds cannot lose its event. A background worker sends the queue.
+- **Signed.** `X-Zylker-Signature: v1=<HMAC-SHA256 of "timestamp.body">` with a per-webhook secret that is shown once; the signed
+  timestamp lets receivers reject replays. `docs/API.md` has verification code for Python and Node.
+- **Retried and logged.** Anything but a 2xx answer (or a timeout, DNS, TLS or connection error) is retried after 30 s, 2 min,
+  10 min, 1 h and 6 h. Every delivery is in the log (UI: **Deliveries**), where a finished one can be sent again, and **Send test**
+  checks an endpoint end to end.
+- **Safe to point at the internet.** Only `http(s)`, no credentials in the URL, redirects are never followed, and a host that
+  resolves to a loopback, private, link-local (cloud metadata) or otherwise non-public address is refused. The address is checked
+  when the delivery is made and the connection goes to the address that was checked, so DNS tricks do not help.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ZYLKER_WEBHOOK_ALLOW_PRIVATE` | *(off)* | `1` lets webhooks target loopback and private-network addresses (an internal receiver, local testing) |
+| `ZYLKER_WEBHOOK_TIMEOUT` | `10` | Seconds each network step of one delivery attempt may take (1-60) |
+
+**The worker.** `zylker-pm serve` starts one. Under gunicorn or waitress run `zylker-pm webhooks-worker` as a second process
+(`--once` delivers what is due and exits, for cron). The Webhooks page warns when no worker has checked in lately. Several workers
+are safe: a delivery is claimed with a lease so two workers never send the same one, and a delivery whose worker died mid-send is
+picked up again.
+
+**Good to know.** Delivery is at-least-once and not ordered, so receivers should de-duplicate on the payload `id`. A webhook secret
+has to be stored readable to sign with it: protect `*.db` files and backups like a token store. Events are the audit-trail entries;
+comment text is deliberately left out (fetch it through the API), and user administration and webhook changes are never delivered.
+New webhook tables are created automatically when the app starts. Delivery is tested against local stand-in servers (including TLS),
+**not** against a particular third-party service: use **Send test** after setting one up.
 
 ## CSV import and export
 
@@ -234,6 +354,28 @@ Valid rows are imported and bad rows are reported by row number - one bad row ne
 Unknown assignees are left unassigned with a warning. Subtask/parent links and milestones are not imported.
 `examples/jira_style_import.csv` is a small fictional file in this layout.
 
+## File attachments
+
+Attach screenshots, specs and logs to the task they belong to: **task dialog -> Attachments -> Attach files**, or drop files anywhere in the
+window while the task is open, or paste a screenshot (Ctrl+V / Cmd+V). Images get a **Preview** button, every file a **Download** button, and a
+project's **Files** tab lists all of its files with the task each belongs to, searchable by name.
+
+- **Who:** anyone signed in can read and download. Members of the project (and managers and admins) can attach. The person who attached a
+  file, or a manager, can delete it. Archived projects are read-only.
+- **Limits:** 10 MB per file (`ZYLKER_ATTACHMENT_MAX_MB`, up to 100), 25 files per task, 2,048 MB for everything
+  (`ZYLKER_ATTACHMENT_QUOTA_MB`, `0` = unlimited). Empty files are refused. The UI checks the size before sending; the server enforces it.
+- **Where files live:** inside the database (two extra tables, created automatically the first time the new version starts - no migration
+  step). `zylker-pm backup` therefore includes them, and deleting a task or project deletes its files in the same transaction.
+- **Audited:** `attachment.added` and `attachment.deleted` appear in the task's history and the project's activity feed (name and size, never content).
+- **From scripts:** the request body is the file itself, not a multipart form (see the [API reference](docs/API.md#attachments)):
+
+  ```bash
+  curl -X POST "http://127.0.0.1:8080/api/tasks/WEB-5/attachments?filename=login-error.png" \
+       -H "Authorization: Bearer $TOKEN" -H "Content-Type: image/png" -H "Expect:" --data-binary @login-error.png
+  ```
+
+Not included: virus scanning, file versions, thumbnails in lists, renaming (delete and attach again) and images embedded in comments.
+
 ## Operations
 
 - **Backups:** `zylker-pm backup /backups/zylker-$(date +%F).db` uses SQLite's online backup, so it is safe while the server runs.
@@ -242,6 +384,10 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
   speaks plain HTTP, sends no HSTS header, and has no CORS (same-origin only). It is also a standard WSGI callable
   (`zylker_pm.app.App`) if you prefer gunicorn or waitress.
 - **Scale:** SQLite in WAL mode with one writer at a time suits a team or department on a single host. It has **not** been load-tested.
+- **Attachments and size:** files are stored in the database, so the file grows with them and so does every backup. An upload is held in memory
+  while it is stored (allow about the per-file limit per concurrent upload). Deleting files frees space inside the database but does not shrink
+  the file: run `sqlite3 zylker.db VACUUM` while the server is stopped to reclaim it. `zylker-pm serve` disconnects a client that has been silent
+  for 60 seconds, so a stalled upload cannot hold a thread for ever.
 - **Upgrades:** the schema version is stored in the database; a database newer than the code is refused rather than modified.
 
 ## Security notes
@@ -255,15 +401,20 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
   no inline scripts or styles, no external resources, no framing - so stored text cannot become markup. A browser test submits
   `<script>`/`<img onerror>` payloads in titles, descriptions, comments and project names and checks that none executes.
 - Static files are served from a fixed whitelist of three paths; there is no filesystem lookup from the URL.
+- **Attachments are inert.** A stored file is only ever served as a download (`Content-Disposition: attachment`, `nosniff`, the usual
+  Content-Security-Policy); the UI saves it as an opaque octet stream and never opens it. The one thing that is displayed is a PNG, JPEG, GIF or
+  WebP whose first bytes really are that image (the claimed type is ignored), shown through a `data:` URL in an `<img>`; SVG is never previewed.
+  File names are reduced to a plain name (no directories, control or direction-override characters) and shown as text. An upload body is read
+  after authentication but before the database's write lock is taken, and half an upload is never stored.
 - **Not covered:** single sign-on (Zoho or otherwise), token expiry, failed-login throttling (tokens are unguessable, but throttle at
-  the proxy anyway), e-mail notifications, per-project read restrictions (every signed-in user can read every project), file attachments.
+  the proxy anyway), e-mail notifications, per-project read restrictions (every signed-in user can read every project and its attachments), malware scanning of attachments.
 
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~180 tests, no dependencies
+python -m unittest discover -s tests -v     # ~370 tests, no dependencies
 pip install playwright && playwright install chromium
-python -m unittest tests.test_ui_e2e -v      # 18 real-browser tests (skipped automatically without Playwright)
+python -m unittest tests.test_ui_e2e -v      # 37 real-browser tests (skipped automatically without Playwright)
 ```
 
 The backend tests include hand-computed expectations for the critical path, workload, burndown and health rules, deadlock
@@ -274,15 +425,17 @@ fails if an endpoint, setting or CLI command is undocumented. `docs/API.md` is t
 zylker_pm/
   app.py routes.py     WSGI app, routing, auth, per-request transactions, security headers
   services/            all business rules (tasks, graph, projects, reports, csvio, ...)
-  notify.py            Cliq notifier; db.py schema; seed.py demo data; cli.py commands
+  notify.py            Cliq notifier; db.py schema + migrations; seed.py demo data; cli.py commands
   static/              the single-page UI (index.html, app.js, styles.css)
 tests/                 unit, HTTP, CLI and browser tests
 ```
 
 ## Limitations and ideas for later
 
-Dependencies are finish-to-start and within one project; there are no custom fields, recurring tasks, task templates or
-attachments; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
-permissions would be the natural next steps for a larger organisation.
+Dependencies are within one project, and lag/lead only flags dates - it never reschedules anything, and the critical path (effort hours) follows finish-to-start links only; related-task links are
+informational and cannot be listed or filtered across the whole organisation yet; checklist items have no assignee or date and are not in the CSV export; watchers are named in the shared Cliq channel
+rather than messaged privately, and nobody is made a watcher automatically; bulk actions work from the List tab (not the board) and cover status, assignee, priority, labels, milestone and due date only;
+there are no custom fields on tasks (only on projects), recurring tasks or task templates; custom project fields cannot be reordered or filtered on yet; the burndown does not remember reopened
+tasks; the timeline draws no dependency arrows; SSO and per-project read permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*

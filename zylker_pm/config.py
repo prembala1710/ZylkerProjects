@@ -8,6 +8,8 @@ from datetime import timezone, tzinfo
 from urllib.parse import urlparse
 
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
+MEGABYTE = 1024 * 1024
+MAX_ATTACHMENT_LIMIT = 100 * MEGABYTE  # an upload is held in memory while it is stored, so the per-file cap has a ceiling
 
 
 def get_tz(name: str) -> tzinfo:
@@ -35,7 +37,11 @@ class Config:
     cliq_bot_unique_name: str = ""  # optional: post as this bot
     max_body_bytes: int = 1_000_000
     max_import_bytes: int = 5_000_000
+    attachment_max_bytes: int = 10 * MEGABYTE  # largest single attachment
+    attachment_quota_bytes: int = 2048 * MEGABYTE  # all attachments together (they live in the database file); 0 = unlimited
     default_task_hours: float = 8.0  # duration assumed for unestimated tasks in critical path
+    webhook_allow_private: bool = False  # let outbound webhooks target loopback / private-network addresses
+    webhook_timeout: float = 10.0  # seconds, per network operation of one webhook delivery attempt
 
     @classmethod
     def from_env(cls, env=None) -> Config:
@@ -45,10 +51,21 @@ class Config:
             return env.get("ZYLKER_" + name, default)
 
         try:
+            attachment_max = int(float(get("ATTACHMENT_MAX_MB", "10")) * MEGABYTE)
+            attachment_quota = int(float(get("ATTACHMENT_QUOTA_MB", "2048")) * MEGABYTE)
+        except (ValueError, OverflowError):
+            raise ValueError("ZYLKER_ATTACHMENT_MAX_MB and ZYLKER_ATTACHMENT_QUOTA_MB must be numbers of megabytes") from None
+        try:
             port = int(get("PORT", "8080"))
         except ValueError:
             raise ValueError("ZYLKER_PORT must be an integer") from None
+        try:
+            webhook_timeout = float(get("WEBHOOK_TIMEOUT", "10"))
+        except ValueError:
+            raise ValueError("ZYLKER_WEBHOOK_TIMEOUT must be a number of seconds") from None
         cfg = cls(
+            attachment_max_bytes=attachment_max,
+            attachment_quota_bytes=attachment_quota,
             db_path=get("DB", "zylker.db"),
             host=get("HOST", "127.0.0.1"),
             port=port,
@@ -56,12 +73,18 @@ class Config:
             public_url=get("PUBLIC_URL").rstrip("/"),
             cliq_endpoint=get("CLIQ_ENDPOINT"),
             cliq_bot_unique_name=get("CLIQ_BOT_UNIQUE_NAME"),
+            webhook_allow_private=get("WEBHOOK_ALLOW_PRIVATE").strip().lower() in ("1", "true", "yes", "on"),
+            webhook_timeout=webhook_timeout,
         )
         cfg.validate()
         return cfg
 
     def validate(self) -> None:
         get_tz(self.timezone)
+        if not 1 <= self.attachment_max_bytes <= MAX_ATTACHMENT_LIMIT:
+            raise ValueError("ZYLKER_ATTACHMENT_MAX_MB must be more than 0 and at most %d" % (MAX_ATTACHMENT_LIMIT // MEGABYTE))
+        if self.attachment_quota_bytes < 0:
+            raise ValueError("ZYLKER_ATTACHMENT_QUOTA_MB must not be negative (0 means unlimited)")
         if self.cliq_endpoint:
             parsed = urlparse(self.cliq_endpoint)
             local = parsed.hostname in LOOPBACK_HOSTS
@@ -71,3 +94,5 @@ class Config:
                 raise ValueError("ZYLKER_CLIQ_ENDPOINT must use https")
         if self.public_url and not self.public_url.startswith(("http://", "https://")):
             raise ValueError("ZYLKER_PUBLIC_URL must start with http:// or https://")
+        if not 1 <= self.webhook_timeout <= 60:
+            raise ValueError("ZYLKER_WEBHOOK_TIMEOUT must be between 1 and 60 seconds")
