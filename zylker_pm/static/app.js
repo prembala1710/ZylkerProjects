@@ -355,6 +355,7 @@ function renderShell() {
     avatar(state.me), h('div', { class: 'user-chip' }, h('div', { text: state.me.display_name }), h('div', { class: 'small muted', text: state.me.role })),
     h('button', { class: 'btn small', onclick: () => signOut('You have been signed out.') }, 'Sign out'));
   root.append(h('div', { class: 'layout' }, sidebar, h('div', { class: 'main' }, topbar, h('main', { class: 'content', id: 'view', tabindex: '-1' }))));
+  if (hasRole('admin')) sidebar.append(h('a', { class: 'nav-link', href: '#/webhooks', dataset: { route: 'webhooks' } }, 'Webhooks'));
   renderProjectNav();
 }
 function renderProjectNav() {
@@ -383,6 +384,7 @@ async function route() {
   try {
     if (a === 'p' && b) await projectView(view, b.toUpperCase(), c || 'board', alive);
     else if (a === 't' && b) { state.pendingTask = b.toUpperCase(); const t = await api('/tasks/' + state.pendingTask); location.replace('#/p/' + t.project + '/board'); }
+    else if (a === 'webhooks' && hasRole('admin')) await webhooksView(view, alive);
     else if (a === 'mine') await myTasksView(view, alive);
     else if (a === 'team') await teamView(view, alive);
     else if (a === 'users' && hasRole('admin')) await usersView(view, alive);
@@ -449,6 +451,149 @@ function workloadCard(workload) {
   if (!rows.length) card.append(h('div', { class: 'empty', text: 'No assigned work in the window.' }));
   for (const i of rows) card.append(h('div', { class: 'item' }, avatar(i.user), h('span', { class: 'grow', text: i.user.display_name }), utilCell(i)));
   return card;
+}
+
+/* ============================== webhooks (admin) ============================== */
+const WEBHOOK_GROUP_LABEL = { project: 'Projects', milestone: 'Milestones', task: 'Tasks', comment: 'Comments', time: 'Time tracking', import: 'CSV import' };
+const DELIVERY_BADGE = { succeeded: ['done', 'Delivered'], failed: ['blocked', 'Failed'], pending: ['todo', 'Queued'], sending: ['in_progress', 'Sending'] };
+const DELIVERY_ERROR = { timeout: 'timed out', connection_failed: 'could not connect', dns_error: 'host name did not resolve', tls_error: 'TLS certificate problem',
+  blocked_address: 'address is private (blocked)', protocol_error: 'invalid HTTP response', invalid_request: 'invalid request', internal_error: 'internal error',
+  cancelled: 'cancelled (webhook paused)', lease_expired: 'worker stopped mid-send' };
+const describeDelivery = (d) => (d.response_status ? `HTTP ${d.response_status}` : (d.error && (DELIVERY_ERROR[d.error] || d.error)) || '\u2014');
+function hostPath(url) { try { const u = new URL(url); return u.host + (u.pathname === '/' ? '' : u.pathname); } catch (e) { return 'invalid URL'; } } // never the query string: it often carries a key
+function webhookHealth(w) {
+  const hl = w.health;
+  if (!w.active) return badge('on_hold', 'Paused');
+  if (hl.consecutive_failures >= 3) return badge('off_track', `Failing \u00d7${hl.consecutive_failures}`, 'Several delivery attempts in a row have failed');
+  if (hl.consecutive_failures > 0) return badge('at_risk', 'Retrying', 'The last delivery attempt failed and will be retried');
+  return hl.last_status === 'succeeded' ? badge('on_track', 'Healthy', 'The last delivery succeeded') : badge('not_started', 'No deliveries yet');
+}
+
+async function webhooksView(view, alive) {
+  const [data, catalog] = await Promise.all([api('/webhooks'), api('/webhooks/events')]);
+  if (!alive()) return;
+  clear(view);
+  const rows = data.items.map((w) => h('tr', {},
+    h('td', {}, h('strong', { text: w.name }), h('div', { class: 'small muted ellipsis', title: hostPath(w.url), text: hostPath(w.url) })),
+    h('td', { title: w.events.join('\n'), text: w.events.includes('*') ? 'All events' : plural(w.events.length, 'subscription') }),
+    h('td', { text: w.projects.length ? w.projects.join(', ') : 'All projects' }),
+    h('td', {}, webhookHealth(w), w.pending_deliveries ? h('div', { class: 'small muted', text: `${w.pending_deliveries} queued` }) : null),
+    h('td', { class: 'small', text: w.health.last_delivery_at ? fmtAgo(w.health.last_delivery_at) : '\u2014' }),
+    h('td', { class: 'right nowrap' },
+      h('button', { class: 'btn small', onclick: () => openDeliveries(w) }, 'Deliveries'), ' ',
+      h('button', { class: 'btn small', onclick: (e) => guarded(e.target, () => sendTestEvent(w)) }, 'Send test'), ' ',
+      h('button', { class: 'btn small', onclick: (e) => guarded(e.target, async () => { await api('/webhooks/' + w.id, { method: 'PATCH', body: { active: !w.active } }); toast(w.active ? 'Webhook paused' : 'Webhook resumed', 'ok'); route(); }) }, w.active ? 'Pause' : 'Resume'), ' ',
+      h('button', { class: 'btn small', onclick: () => openWebhookForm(catalog, w) }, 'Edit'))));
+  put(view, // put(), not append(): optional blocks may be null and Element.append(null) prints the word "null"
+    h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('h1', { text: 'Webhooks' }),
+      h('p', { class: 'muted', text: 'Call other systems when work changes here. Every request is signed, failures are retried with back-off, and each attempt is logged.' })),
+      h('button', { class: 'btn primary', onclick: () => openWebhookForm(catalog, null) }, '+ New webhook')),
+    data.worker.running ? null : h('div', { class: 'card notice', role: 'alert', style: { marginBottom: '16px' } },
+      h('strong', { text: 'The delivery worker is not running. ' }), 'Events are queued but nothing is sending them. ', h('code', { text: 'zylker-pm serve' }),
+      ' starts a worker; next to any other server, run ', h('code', { text: 'zylker-pm webhooks-worker' }), '.'),
+    h('div', { class: 'card flush' }, data.items.length
+      ? h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['Webhook', 'Events', 'Projects', 'Status', 'Last delivery', ''].map((x) => h('th', { text: x })))), h('tbody', {}, rows))
+      : h('div', { class: 'empty', text: 'No webhooks yet. Add one to start sending events to another system.' })));
+}
+async function sendTestEvent(w) {
+  const sent = await api(`/webhooks/${w.id}/test`, { method: 'POST' });
+  toast('Test event queued\u2026');
+  for (let i = 0; i < 24; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const d = await api(`/webhooks/${w.id}/deliveries/${sent.id}`);
+    if (d.status === 'succeeded') return toast(`Test delivered: ${describeDelivery(d)}`, 'ok');
+    if (d.status === 'failed') return toast(`Test failed: ${describeDelivery(d)}`, 'error');
+  }
+  return toast('The test is still queued. Is the delivery worker running?', 'error');
+}
+function showWebhookSecret(name, secret) {
+  const m = openModal({ title: `Signing secret for ${name}`, narrow: true, content: h('div', { class: 'stack' },
+    h('p', { text: 'Copy this now \u2014 it will not be shown again. Receivers use it to check the X-Zylker-Signature header.' }), h('div', { class: 'token-box', text: secret }),
+    h('button', { class: 'btn', onclick: async (e) => { try { await navigator.clipboard.writeText(secret); e.target.textContent = 'Copied \u2713'; } catch (err) { toast('Select the secret and copy it manually', 'error'); } } }, 'Copy to clipboard')),
+  footer: [h('button', { class: 'btn primary', onclick: () => m.close() }, 'Done')] });
+}
+function openWebhookForm(catalog, existing) {
+  const have = existing ? existing.events : ['*'];
+  const f = {
+    name: h('input', { type: 'text', maxlength: 80, required: true, value: existing ? existing.name : '', placeholder: 'e.g. Build server' }),
+    url: h('input', { type: 'text', maxlength: 2000, required: true, autocomplete: 'off', value: existing ? existing.url : '', placeholder: 'https://example.com/hooks/zylker' }),
+    active: h('input', { type: 'checkbox', checked: existing ? existing.active : true }),
+  };
+  const everything = h('input', { type: 'checkbox', checked: have.includes('*') });
+  const groups = Object.entries(catalog.groups).map(([group, names]) => ({ group, whole: h('input', { type: 'checkbox', checked: have.includes(group + '.*') }),
+    each: names.map((name) => ({ name, box: h('input', { type: 'checkbox', checked: have.includes(name) }) })) }));
+  const syncEvents = () => groups.forEach((g) => { g.whole.disabled = everything.checked; g.each.forEach((e) => { e.box.disabled = everything.checked || g.whole.checked; }); });
+  [everything, ...groups.map((g) => g.whole)].forEach((box) => box.addEventListener('change', syncEvents));
+  const everyProject = h('input', { type: 'checkbox', checked: !existing || !existing.projects.length });
+  const projectBoxes = state.projects.map((p) => ({ key: p.key, name: p.name, box: h('input', { type: 'checkbox', checked: !!existing && existing.projects.includes(p.key) }) }));
+  const syncProjects = () => projectBoxes.forEach((p) => { p.box.disabled = everyProject.checked; });
+  everyProject.addEventListener('change', syncProjects);
+  syncEvents(); syncProjects();
+  const row = (box, ...label) => h('label', { class: 'check-row' }, box, ...label);
+  const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => {
+    const events = everything.checked ? ['*'] : groups.flatMap((g) => (g.whole.checked ? [g.group + '.*'] : g.each.filter((e) => e.box.checked).map((e) => e.name)));
+    if (!events.length) { toast('Choose at least one event', 'error'); return; }
+    const projects = everyProject.checked ? [] : projectBoxes.filter((p) => p.box.checked).map((p) => p.key);
+    if (!everyProject.checked && !projects.length) { toast('Choose at least one project, or tick \u201cAll projects\u201d', 'error'); return; }
+    const body = { name: f.name.value, url: f.url.value, events, projects, active: f.active.checked };
+    if (existing) { await api('/webhooks/' + existing.id, { method: 'PATCH', body }); m.close(); toast('Webhook saved', 'ok'); route(); return; }
+    const w = await api('/webhooks', { method: 'POST', body });
+    m.close(); route(); showWebhookSecret(w.name, w.secret);
+  }) }, existing ? 'Save changes' : 'Create webhook');
+  const remove = existing ? h('button', { class: 'btn danger', onclick: (e) => guarded(e.target, async () => {
+    if (!(await confirmBox(`Delete ${existing.name}? Its delivery log is deleted with it.`, 'Delete webhook', true))) return;
+    await api('/webhooks/' + existing.id, { method: 'DELETE' }); m.close(); toast('Webhook deleted', 'ok'); route();
+  }) }, 'Delete\u2026') : null;
+  const rotate = existing ? h('div', { class: 'row small' }, h('span', { class: 'muted', text: `Signing secret ${existing.secret_hint}` }),
+    h('button', { class: 'btn small', onclick: (e) => guarded(e.target, async () => {
+      if (!(await confirmBox('Issue a new signing secret? Receivers still using the old one will reject deliveries until they are updated.', 'Rotate secret', true))) return;
+      const r = await api(`/webhooks/${existing.id}/rotate-secret`, { method: 'POST' }); m.close(); route(); showWebhookSecret(existing.name, r.secret);
+    }) }, 'Rotate\u2026')) : null;
+  const m = openModal({ title: existing ? `Edit ${existing.name}` : 'New webhook', content: h('div', { class: 'stack' },
+    field('Name', f.name), field('Payload URL', f.url, 'Events are POSTed here as JSON. Use https; the address is never written to logs.'),
+    h('div', {}, h('div', { class: 'fieldset-title', text: 'Events' }), h('div', { class: 'check-list' }, row(everything, h('strong', { text: 'All events' })),
+      groups.map((g) => h('div', { class: 'check-group' }, row(g.whole, `${WEBHOOK_GROUP_LABEL[g.group] || g.group} \u2014 everything`),
+        h('div', { class: 'children' }, g.each.map((e) => row(e.box, e.name.slice(e.name.indexOf('.') + 1).replace(/_/g, ' ')))))))),
+    h('div', {}, h('div', { class: 'fieldset-title', text: 'Projects' }), h('div', { class: 'check-list' }, row(everyProject, h('strong', { text: 'All projects' })),
+      projectBoxes.map((p) => row(p.box, h('span', { class: 'nav-key', text: p.key }), p.name)))),
+    row(f.active, 'Active \u2014 send events to this URL'), rotate),
+  footer: [remove, h('span', { class: 'spacer' }), h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
+}
+function openDeliveries(w) {
+  const list = h('div'), more = h('div', { style: { marginTop: '10px' } });
+  let items = [];
+  const render = () => {
+    clear(list);
+    put(list, items.length ? h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['When', 'Event', 'Status', 'Tries', 'Result', ''].map((x) => h('th', { text: x })))),
+      h('tbody', {}, items.map((d) => {
+        const [kind, label] = DELIVERY_BADGE[d.status];
+        return h('tr', {}, h('td', { class: 'small nowrap', title: d.created_at, text: fmtAgo(d.created_at) }),
+          h('td', {}, h('code', { text: d.event }), d.redelivery_of ? h('div', { class: 'small muted', text: `redelivery of #${d.redelivery_of}` }) : null),
+          h('td', {}, badge(kind, label, d.next_attempt_at ? 'Next attempt ' + d.next_attempt_at : undefined)), h('td', { text: `${d.attempts}/${d.max_attempts}` }),
+          h('td', { class: 'small', title: d.response_excerpt || undefined, text: describeDelivery(d) }),
+          h('td', { class: 'right nowrap' }, h('button', { class: 'btn small', onclick: (e) => guarded(e.target, () => openDeliveryDetail(w, d)) }, 'Details'), ' ',
+            d.status === 'succeeded' || d.status === 'failed' ? h('button', { class: 'btn small', onclick: (e) => guarded(e.target, async () => { await api(`/webhooks/${w.id}/deliveries/${d.id}/redeliver`, { method: 'POST' }); toast('Queued again', 'ok'); load(); }) }, 'Redeliver') : null));
+      }))) : h('div', { class: 'empty', text: 'Nothing has been sent yet.' }));
+  };
+  const load = async (older) => {
+    const page = await api(`/webhooks/${w.id}/deliveries`, { query: { limit: 25, before: older || '' } });
+    items = older ? items.concat(page.items) : page.items;
+    render(); clear(more);
+    if (page.next_before) more.append(h('button', { class: 'btn', onclick: (e) => guarded(e.target, () => load(page.next_before)) }, 'Load older'));
+  };
+  const m = openModal({ title: `Deliveries \u2014 ${w.name}`, onClose: () => route(), content: h('div', {}, list, more),
+    footer: [h('button', { class: 'btn', onclick: (e) => guarded(e.target, () => load()) }, 'Refresh'), h('button', { class: 'btn primary', onclick: () => m.close() }, 'Close')] });
+  load().catch((e) => toast(e.message, 'error'));
+}
+async function openDeliveryDetail(w, d) {
+  const full = await api(`/webhooks/${w.id}/deliveries/${d.id}`);
+  const line = (label, value) => h('div', { class: 'item' }, h('span', { class: 'muted', style: { minWidth: '120px' }, text: label }), h('span', { class: 'grow', text: value }));
+  const m = openModal({ title: `Delivery #${full.id}`, content: h('div', { class: 'stack' },
+    line('Event', full.event), line('Event id', full.event_id), line('Status', `${DELIVERY_BADGE[full.status][1]} \u00b7 attempt ${full.attempts} of ${full.max_attempts}`),
+    line('Last attempt', full.last_attempt_at || '\u2014'), full.next_attempt_at ? line('Next attempt', full.next_attempt_at) : null,
+    line('Result', describeDelivery(full) + (full.duration_ms !== null ? ` in ${full.duration_ms} ms` : '')), full.response_excerpt ? line('Response', full.response_excerpt) : null,
+    h('div', { class: 'fieldset-title', text: 'Payload' }), h('pre', { class: 'code', text: JSON.stringify(full.payload, null, 2) })),
+  footer: [h('button', { class: 'btn primary', onclick: () => m.close() }, 'Close')] });
 }
 
 /* ============================== my tasks & team ============================== */

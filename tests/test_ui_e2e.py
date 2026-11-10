@@ -281,6 +281,9 @@ class WorkflowTests(UiCase):
         expect(dialog).to_contain_text("INT-5")
         dialog.get_by_label("Priority").select_option("critical")
         expect(dialog.get_by_label("Priority")).to_have_value("critical")
+        # Wait until the change is saved and the dialog has re-rendered: text typed into the old textarea while that
+        # happens is lost (this test failed about one run in ten before it waited).
+        expect(dialog).to_contain_text("priority: high \u2192 critical")
         dialog.get_by_label("New comment").fill("Heads up @bob, this is ready")
         dialog.get_by_role("button", name="Comment").click()
         expect(dialog.locator(".comment .body")).to_have_text("Heads up @bob, this is ready")
@@ -292,6 +295,7 @@ class WorkflowTests(UiCase):
         expect(dialog.locator(".section", has_text="Dependencies").locator(".item", has_text="INT-1")).to_be_visible()
         dialog.get_by_label("Status").select_option("blocked")  # allowed from todo, regardless of links
         expect(dialog.get_by_label("Status")).to_have_value("blocked")
+        expect(dialog).to_contain_text("status: todo \u2192 blocked")  # saved, so closing the dialog cannot race the API check below
         page.keyboard.press("Escape")
         status, task = api(TOKENS["alice"], "GET", "/tasks/INT-5")
         self.assertEqual((task["priority"], task["assignee"]["username"], task["logged_hours"], task["status"]), ("critical", "bob", 1.5, "blocked"))

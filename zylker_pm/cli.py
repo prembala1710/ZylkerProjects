@@ -17,7 +17,8 @@ from .config import LOOPBACK_HOSTS, Config
 from .db import connect, init_db
 from .domain import ROLES
 from .errors import ApiError
-from .services import csvio, reports, users
+from .services import csvio, reports, users, webhooks
+from .webhook_worker import WebhookWorker
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -66,14 +67,39 @@ def cmd_serve(args, cfg):
             file=sys.stderr,
         )
     server = make_threaded_server(app, cfg.host, cfg.port)
-    print("Zylker Projects %s on http://%s:%d  (db: %s, timezone: %s, Cliq: %s)" % (
-        __version__, cfg.host, cfg.port, cfg.db_path, cfg.timezone, "on" if cfg.cliq_endpoint else "off"))  # fmt: skip
+    worker = None if args.no_webhook_worker else WebhookWorker(cfg)
+    print("Zylker Projects %s on http://%s:%d  (db: %s, timezone: %s, Cliq: %s, webhook worker: %s)" % (
+        __version__, cfg.host, cfg.port, cfg.db_path, cfg.timezone, "on" if cfg.cliq_endpoint else "off", "on" if worker else "off"))  # fmt: skip
+    if worker:
+        worker.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down.")
     finally:
+        if worker:
+            worker.stop()
         server.server_close()
+    return 0
+
+
+def cmd_webhooks_worker(args, cfg):
+    """Deliver queued webhooks without serving HTTP (for gunicorn/waitress deployments, or as a cron job with --once)."""
+    init_db(cfg.db_path)
+    webhooks.ensure_schema(cfg.db_path)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    worker = WebhookWorker(cfg)
+    if args.once:
+        done = worker.run_until_idle()
+        print("Attempted %d webhook deliver%s." % (done, "y" if done == 1 else "ies"))
+        return 0
+    print("Webhook worker running (db: %s). Press Ctrl+C to stop." % cfg.db_path)
+    try:
+        worker.run_forever()
+    except KeyboardInterrupt:
+        print("\nStopping.")
+    finally:
+        worker.stop()
     return 0
 
 
@@ -179,7 +205,12 @@ def build_parser():
     p = sub.add_parser("serve", help="run the web UI and API")
     p.add_argument("--host")
     p.add_argument("--port", type=int)
+    p.add_argument("--no-webhook-worker", action="store_true", help="do not deliver outbound webhooks from this process")
     p.set_defaults(fn=cmd_serve)
+
+    p = sub.add_parser("webhooks-worker", help="deliver queued outbound webhooks (for deployments that do not use `serve`)")
+    p.add_argument("--once", action="store_true", help="deliver what is due now, then exit")
+    p.set_defaults(fn=cmd_webhooks_worker)
 
     p = sub.add_parser("create-user", help="create a user and print their API token")
     p.add_argument("username")

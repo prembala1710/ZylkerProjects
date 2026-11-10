@@ -49,7 +49,7 @@ SECURITY_HEADERS = [
 ]
 
 STATUS_TEXT = {
-    200: "OK", 201: "Created", 204: "No Content", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+    200: "OK", 201: "Created", 202: "Accepted", 204: "No Content", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
     404: "Not Found", 405: "Method Not Allowed", 409: "Conflict", 413: "Payload Too Large",
     415: "Unsupported Media Type", 422: "Unprocessable Entity", 500: "Internal Server Error",
 }  # fmt: skip
@@ -140,13 +140,15 @@ def route(method, pattern, role="viewer", public=False, body_limit=None):
 
 class App:
     def __init__(self, config: Config, clock=None, notifier=None):
-        from . import routes  # noqa: F401 - registers handlers
+        from . import routes, webhook_routes  # noqa: F401 - registers handlers
+        from .services import webhooks
 
         config.validate()
         self.config = config
         self.tz = get_tz(config.timezone)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.notifier = notifier if notifier is not None else notify.build_notifier(config)
+        webhooks.ensure_schema(config.db_path)  # additive tables for databases created before webhooks existed
 
     # -- helpers shared by the CLI and tests -------------------------------------------
 

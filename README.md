@@ -48,7 +48,8 @@ The same commands are available as `zylker-pm ...` after `pip install .`. Everyt
 | Command | Purpose |
 |---|---|
 | `zylker-pm init [--admin USER --name NAME --email E]` | Create the database; optionally create the first admin and print its token |
-| `zylker-pm serve [--host H --port P]` | Run the web UI and API (threaded; logs one line per request, never headers or tokens) |
+| `zylker-pm serve [--host H --port P] [--no-webhook-worker]` | Run the web UI and API (threaded; logs one line per request, never headers or tokens). Also delivers outbound webhooks unless told not to |
+| `zylker-pm webhooks-worker [--once]` | Deliver queued outbound webhooks without serving HTTP (for gunicorn / waitress deployments); `--once` delivers what is due and exits |
 | `zylker-pm create-user USER --role member --name "..." [--capacity 30]` | Add a person and print their token |
 | `zylker-pm rotate-token USER` | Issue a new token; the old one stops working immediately |
 | `zylker-pm digest [--days 3] [--project KEY] [--post]` | Print the overdue / due-soon digest; `--post` sends it to Cliq |
@@ -214,6 +215,47 @@ Schedule the digest with whatever you already use, for example cron on weekdays 
 Task titles are stripped of Cliq markup before posting, so a title cannot inject links, bold text or mentions into a channel.
 Delivery is covered by tests against a local stand-in server, **not** against live Cliq: after configuring, run
 `zylker-pm digest --post` once and check the channel.
+
+## Outbound webhooks
+
+Webhooks let other systems react to what happens here: a build server, a chat relay, a spreadsheet, another Zylker. An admin adds
+one under **Webhooks** in the sidebar (or with `POST /api/webhooks`), chooses the events and, optionally, the projects, and the
+server sends a signed JSON `POST` for every matching change:
+
+```json
+{"id": "evt_412", "event": "task.status_changed", "created_at": "2026-10-16T09:00:00Z",
+ "project": {"key": "WEB", "name": "Website Redesign"},
+ "task": {"key": "WEB-5", "title": "Homepage layout", "status": "in_review", "priority": "high", "type": "task", "assignee": "bob", "due_date": "2026-10-30"},
+ "actor": {"username": "alice", "display_name": "Alice Morgan"},
+ "details": {"changes": {"status": ["in_progress", "in_review"]}}}
+```
+
+- **No lost events, no phantom ones.** An event is written to a queue in the same database transaction as the change it describes, so a
+  request that fails or rolls back announces nothing and one that succeeds cannot lose its event. A background worker sends the queue.
+- **Signed.** `X-Zylker-Signature: v1=<HMAC-SHA256 of "timestamp.body">` with a per-webhook secret that is shown once; the signed
+  timestamp lets receivers reject replays. `docs/API.md` has verification code for Python and Node.
+- **Retried and logged.** Anything but a 2xx answer (or a timeout, DNS, TLS or connection error) is retried after 30 s, 2 min,
+  10 min, 1 h and 6 h. Every delivery is in the log (UI: **Deliveries**), where a finished one can be sent again, and **Send test**
+  checks an endpoint end to end.
+- **Safe to point at the internet.** Only `http(s)`, no credentials in the URL, redirects are never followed, and a host that
+  resolves to a loopback, private, link-local (cloud metadata) or otherwise non-public address is refused. The address is checked
+  when the delivery is made and the connection goes to the address that was checked, so DNS tricks do not help.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ZYLKER_WEBHOOK_ALLOW_PRIVATE` | *(off)* | `1` lets webhooks target loopback and private-network addresses (an internal receiver, local testing) |
+| `ZYLKER_WEBHOOK_TIMEOUT` | `10` | Seconds each network step of one delivery attempt may take (1-60) |
+
+**The worker.** `zylker-pm serve` starts one. Under gunicorn or waitress run `zylker-pm webhooks-worker` as a second process
+(`--once` delivers what is due and exits, for cron). The Webhooks page warns when no worker has checked in lately. Several workers
+are safe: a delivery is claimed with a lease so two workers never send the same one, and a delivery whose worker died mid-send is
+picked up again.
+
+**Good to know.** Delivery is at-least-once and not ordered, so receivers should de-duplicate on the payload `id`. A webhook secret
+has to be stored readable to sign with it: protect `*.db` files and backups like a token store. Events are the audit-trail entries;
+comment text is deliberately left out (fetch it through the API), and user administration and webhook changes are never delivered.
+New webhook tables are created automatically when the app starts. Delivery is tested against local stand-in servers (including TLS),
+**not** against a particular third-party service: use **Send test** after setting one up.
 
 ## CSV import and export
 

@@ -9,11 +9,17 @@ from ..util import truncate
 
 
 def log(ctx, action, *, project_id=None, task_id=None, task_key=None, details=None):
-    ctx.conn.execute(
+    details = details or {}
+    cur = ctx.conn.execute(
         "INSERT INTO activity (project_id, task_id, task_key, actor_id, action, details, created_at) "
         "VALUES (?,?,?,?,?,?,?)",
-        (project_id, task_id, task_key, ctx.actor_id, action, json.dumps(details or {}), ctx.now_iso),
+        (project_id, task_id, task_key, ctx.actor_id, action, json.dumps(details), ctx.now_iso),
     )
+    # Outbound webhooks: matching subscriptions get a queued delivery in this same transaction (transactional
+    # outbox). Imported late because the webhooks service writes its own audit entries through this module.
+    from . import webhooks
+
+    webhooks.enqueue_activity(ctx, cur.lastrowid, action, project_id=project_id, task_id=task_id, task_key=task_key, details=details)
 
 
 def diff_value(value):

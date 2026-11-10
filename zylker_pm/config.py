@@ -36,6 +36,8 @@ class Config:
     max_body_bytes: int = 1_000_000
     max_import_bytes: int = 5_000_000
     default_task_hours: float = 8.0  # duration assumed for unestimated tasks in critical path
+    webhook_allow_private: bool = False  # let outbound webhooks target loopback / private-network addresses
+    webhook_timeout: float = 10.0  # seconds, per network operation of one webhook delivery attempt
 
     @classmethod
     def from_env(cls, env=None) -> Config:
@@ -48,6 +50,10 @@ class Config:
             port = int(get("PORT", "8080"))
         except ValueError:
             raise ValueError("ZYLKER_PORT must be an integer") from None
+        try:
+            webhook_timeout = float(get("WEBHOOK_TIMEOUT", "10"))
+        except ValueError:
+            raise ValueError("ZYLKER_WEBHOOK_TIMEOUT must be a number of seconds") from None
         cfg = cls(
             db_path=get("DB", "zylker.db"),
             host=get("HOST", "127.0.0.1"),
@@ -56,6 +62,8 @@ class Config:
             public_url=get("PUBLIC_URL").rstrip("/"),
             cliq_endpoint=get("CLIQ_ENDPOINT"),
             cliq_bot_unique_name=get("CLIQ_BOT_UNIQUE_NAME"),
+            webhook_allow_private=get("WEBHOOK_ALLOW_PRIVATE").strip().lower() in ("1", "true", "yes", "on"),
+            webhook_timeout=webhook_timeout,
         )
         cfg.validate()
         return cfg
@@ -71,3 +79,5 @@ class Config:
                 raise ValueError("ZYLKER_CLIQ_ENDPOINT must use https")
         if self.public_url and not self.public_url.startswith(("http://", "https://")):
             raise ValueError("ZYLKER_PUBLIC_URL must start with http:// or https://")
+        if not 1 <= self.webhook_timeout <= 60:
+            raise ValueError("ZYLKER_WEBHOOK_TIMEOUT must be between 1 and 60 seconds")
