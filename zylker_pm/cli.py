@@ -17,7 +17,7 @@ from .config import LOOPBACK_HOSTS, Config
 from .db import connect, init_db
 from .domain import ROLES
 from .errors import ApiError
-from .services import csvio, projection, reports, users, webhooks
+from .services import csvio, msproject, projection, reports, users, webhooks
 from .webhook_worker import WebhookWorker
 
 
@@ -204,6 +204,39 @@ def cmd_import_csv(args, cfg):
     return 0 if not report["errors"] else 3
 
 
+def cmd_msp_export(args, cfg):
+    app = App(cfg)
+    with app.session(write=False) as ctx:
+        data = msproject.export_xml(ctx, args.project)
+    if args.output == "-":
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+        return 0
+    path = args.output or args.project.upper() + "-msproject.xml"
+    with open(path, "wb") as f:
+        f.write(data)
+    print("Wrote %s (%d bytes)" % (path, len(data)))
+    return 0
+
+
+def cmd_msp_import(args, cfg):
+    app = App(cfg)
+    if args.file == "-":
+        data = sys.stdin.buffer.read()
+    else:
+        with open(args.file, "rb") as f:
+            data = f.read()
+    with app.session() as ctx:
+        row = users.find_by_username(ctx.conn, args.as_user)
+    if row is None:
+        print("No such user: %s" % args.as_user, file=sys.stderr)
+        return 1
+    with app.session(user=row) as ctx:
+        report = msproject.import_xml(ctx, args.project, data, dry_run=args.dry_run, add_missing_members=args.add_missing_members)
+    print(json.dumps(report, indent=2))
+    return 0 if not report["errors"] else 3
+
+
 def cmd_seed_demo(args, cfg):
     from .seed import seed_demo
 
@@ -273,6 +306,19 @@ def build_parser():
     p.add_argument("--dry-run", action="store_true", help="validate and report without writing")
     p.add_argument("--add-missing-members", action="store_true", help="add assignees who are not yet project members")
     p.set_defaults(fn=cmd_import_csv)
+
+    p = sub.add_parser("msp-export", help="write a project as a Microsoft Project XML (MSPDI) file")
+    p.add_argument("--project", required=True, help="project key")
+    p.add_argument("-o", "--output", metavar="FILE", help="where to write it (default KEY-msproject.xml; - for standard output)")
+    p.set_defaults(fn=cmd_msp_export)
+
+    p = sub.add_parser("msp-import", help="import tasks, milestones and dependencies from a Microsoft Project XML (MSPDI) file")
+    p.add_argument("file", help="XML path, or - for stdin")
+    p.add_argument("--project", required=True, help="target project key")
+    p.add_argument("--as", dest="as_user", required=True, metavar="USERNAME", help="user performing the import")
+    p.add_argument("--dry-run", action="store_true", help="validate and report without writing")
+    p.add_argument("--add-missing-members", action="store_true", help="add people who are not yet project members")
+    p.set_defaults(fn=cmd_msp_import)
 
     p = sub.add_parser("seed-demo", help="load fictional sample data (empty databases only)")
     p.set_defaults(fn=cmd_seed_demo)
