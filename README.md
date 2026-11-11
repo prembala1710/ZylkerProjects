@@ -30,6 +30,9 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **Baselines: plan versus actual** - freeze a project's plan, then see how far it has drifted: which tasks and milestones slipped and by
   how many days, what was added or dropped, how the scope and the finish date moved, with the planned dates drawn under the live bars
   on the timeline. See [Baselines](#baselines).
+- **MSP: clients and a client portal** - for a managed-service provider: group projects under the clients you work for, see which client needs attention first, and give each client
+  contact a login that shows only the projects you share with it (a summary or the full status), with your own message on top. Everything else is closed to a client contact by default,
+  and a test tries every route to prove it. See [Clients and the client portal](#clients-and-the-client-portal).
 - **Workload and capacity** - estimated work due in the next N weeks vs each person's weekly capacity, with overallocation flagged.
 - **Burndown, critical path, timesheets, digests** - computed live from the data.
 - **Roles and an audit trail** - viewer / member / manager / admin, per-project membership, and a field-level history of every change.
@@ -52,7 +55,7 @@ python -m zylker_pm serve                                       # http://127.0.0
 ```
 
 Open the page and paste the token. Optional: `python -m zylker_pm seed-demo` loads a clearly fictional organisation
-(three projects, five users) so you can click around first - run it on an empty database only.
+(three projects, five users, two clients with a contact each) so you can click around first - run it on an empty database only.
 
 The same commands are available as `zylker-pm ...` after `pip install .`. Everything the CLI can do:
 
@@ -165,9 +168,10 @@ fields at once and an optional all-or-nothing mode (see `docs/API.md`). Cliq get
 | **viewer** | Read everything: projects, tasks, reports, exports |
 | **member** | Viewer + create/edit tasks, comment, log time and link dependencies **in projects they belong to** |
 | **manager** | Member + everything in *any* project: create and edit projects, manage members and milestones, delete tasks, import CSV and Microsoft Project files, see everyone's timesheet |
-| **admin** | Manager + manage users and roles, define custom project fields, delete projects, read the global audit trail |
+| **admin** | Manager + manage users and roles, define custom project fields, delete projects, read the global audit trail, create client contacts and delete clients |
+| **client contact** | Not a staff role: a viewer who is tied to one client and can read nothing but that client's portal (see [Clients and the client portal](#clients-and-the-client-portal)) |
 
-Project membership also controls who can be *assigned* work. Archived projects are read-only for all roles.
+Managers also create clients and decide what each client sees of a project. Project membership also controls who can be *assigned* work. Archived projects are read-only for all roles.
 The server is the authority: the UI hides controls a role cannot use, but every rule is enforced in the API.
 
 ## Rules the system enforces
@@ -322,6 +326,48 @@ plan* and *After the re-plan*. Setting and deleting one is written to the projec
 was meant to do the work. Two baselines cannot be compared with each other, only each with the project as it is now. Baselines are not
 exported to or imported from Microsoft Project (its own baselines are not carried either, see below), they cannot be edited, and a project that
 has more than 10,000 tasks cannot be baselined. The comparison is computed from live data each time it is asked for, so it is always current.
+
+## Clients and the client portal
+
+A managed-service provider works for several organisations, and none of them may see another's work. Zylker models that with *clients*: a client
+groups projects (a project belongs to at most one client) and has *contacts*, the people on the client's side, who sign in with a token of their own
+and land in a **client portal**.
+
+**What a client sees is decided project by project, and nothing is shared until a manager decides.** On *Clients -> the client* a manager links a
+project and chooses what the client sees of it:
+
+- **Not shared** (the default): the project is not in the portal at all.
+- **Summary**: the project's rating and the reasons behind it, its progress, the milestones and the manager's message. No task is named.
+- **Full status**: the summary plus the forecast and what happened, task by task.
+
+A manager can also leave a **message for the client** on a project; it is shown at the top, with the manager's name and the date.
+
+**What the portal shows.** A headline in words (*Website Redesign is at risk. 2 of 10 tasks are done (20%); none finished in the last 7 days. Projected to finish
+Thu 26 Nov, 15 days before the due date (Fri 11 Dec). 1 of 8 open tasks will miss its own due date.*), the rating and its reasons, progress, and the milestones that are not
+achieved yet. At the full level also: the forecast and the tasks that will finish after their own dates, what was finished in the period, what is due in the next 14 days, what is
+overdue or blocked, and what changed in the period: due dates that moved (from where they were when the period began to where they are now), tasks added and tasks cancelled.
+The period is 7, 14 or 30 days (`?days=1..90` in the API), and the page prints cleanly as a report.
+
+**What it never shows.** Who works on a task, hours and estimates, budgets and the other custom project fields, comments, descriptions, baselines, people's workload, the reasons the projection
+gives for a delay (they name colleagues and other clients' work), and every project that is not shared with that client. The portal is built from its own queries, not from the general
+task, project and report endpoints, so nothing added to those later can leak into it.
+
+**A contact can do nothing else.** The server lists the routes a contact may call - who it is, the server's enumerations and the two portal routes - and refuses every other route
+with `403`, whatever the contact's role; a route that says nothing about clients is closed to them. A test calls every route of the server as a contact to prove it, and another fails
+when the list of allowed routes changes without anybody meaning it to. Another client's project, a project that is not shared, an archived one and one that does not exist are the
+same `404`. Contacts are tied to their client for good: there is no way to untie one (the database itself refuses to delete or move the tie), so no sequence of calls turns a contact into staff, and one who is no longer wanted is deactivated
+(signed out at once). A client that is *suspended* locks all of its contacts out until it is reactivated. A contact cannot be a project member or assignee, does not show in the user list and is
+never matched by an import.
+
+**For the staff.** *Clients* lists every client with the worst health and forecast of its projects, the ones that need attention first. The page of a client has its projects (with a selector
+for what the client sees), its message, and its contacts: admins add contacts (the token is shown once), issue new tokens and deactivate. **Preview portal** shows the staff exactly what the client
+sees. `zylker-pm seed-demo` creates two clients, *Zylker Retail* (sees the full status of *Website Redesign*, contact `rita`) and *Zylker Mobile* (sees a summary of *Mobile App v2*, contact `milo`);
+their tokens are printed with the others.
+
+**What it is not.** It is not separate databases or separate organisations: the staff see everything, and a contact only reads (no comments or requests from clients yet, no e-mail invitations,
+no per-client branding or domain). What a client sees at the full level includes task titles, so work that must stay internal belongs in a project that is not shared (or is shared as a summary).
+Every view of a full-status project runs the delivery projection for the whole organisation, so a very large installation should expect that to take a moment; reads in the portal are not recorded.
+Clients, links and contacts are in the audit trail (and, except for contacts, in webhooks); see [docs/API.md](docs/API.md#clients-and-the-client-portal).
 
 ## Zoho Cliq
 
@@ -509,8 +555,10 @@ Not included: virus scanning, file versions, thumbnails in lists, renaming (dele
 - **Imported files are untrusted.** A Microsoft Project file is parsed without ever expanding entities or reading anything outside the request
   (a `DOCTYPE` is refused), with limits on size, nesting and element counts, and every value is validated like an API request; names from the file
   are shown as text.
+- **Client contacts are fenced in by default.** A contact's token is accepted only by the routes that are marked for clients; every other route, existing or added later, refuses it. What the portal
+  returns is selected field by field, never filtered from a fuller answer, and a project that is not shared is indistinguishable from one that does not exist.
 - **Not covered:** single sign-on (Zoho or otherwise), token expiry, failed-login throttling (tokens are unguessable, but throttle at
-  the proxy anyway), e-mail notifications, per-project read restrictions (every signed-in user can read every project and its attachments), malware scanning of attachments.
+  the proxy anyway), e-mail notifications, per-project read restrictions for staff (every signed-in staff member can read every project and its attachments; only client contacts are limited, to what is shared with their client), malware scanning of attachments.
 
 ## Development
 
@@ -539,6 +587,6 @@ Dependencies are within one project, and lag/lead only flags dates - it never re
 informational and cannot be listed or filtered across the whole organisation yet; checklist items have no assignee or date and are not in the CSV export; watchers are named in the shared Cliq channel
 rather than messaged privately, and nobody is made a watcher automatically; bulk actions work from the List tab (not the board) and cover status, assignee, priority, labels, milestone and due date only;
 there are no custom fields on tasks (only on projects), recurring tasks or task templates; custom project fields cannot be reordered or filtered on yet; the burndown does not remember reopened
-tasks; the timeline's dependency arrows cannot be clicked and join only tasks that are on the chart, so a link to a parent task is counted but not drawn; baselines cover dates, estimates and status only (not people, priorities or dependencies), cannot be edited or compared with each other, and are not exchanged with Microsoft Project; SSO and per-project read permissions would be the natural next steps for a larger organisation.
+tasks; the timeline's dependency arrows cannot be clicked and join only tasks that are on the chart, so a link to a parent task is counted but not drawn; baselines cover dates, estimates and status only (not people, priorities or dependencies), cannot be edited or compared with each other, and are not exchanged with Microsoft Project; client contacts can only read (no comments or requests from clients, no e-mail invitations, no branding or domain per client) and the portal does not record who looked at what; SSO and per-project read permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
