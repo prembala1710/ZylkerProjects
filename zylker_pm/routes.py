@@ -194,6 +194,11 @@ def project_critical_path(ctx, req, key):
     return reports.critical_path(ctx, key)
 
 
+@route("GET", "/api/projects/{key}/dependencies")
+def project_dependencies(ctx, req, key):
+    return deps.list_for_project(ctx, key)
+
+
 @route("GET", "/api/projects/{key}/burndown")
 def project_burndown(ctx, req, key):
     return reports.burndown(ctx, key, req.query)
