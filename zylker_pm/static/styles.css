@@ -229,6 +229,13 @@ svg.chart { width: 100%; height: auto; display: block; } svg.chart text { fill: 
 .chart.dep-focus .tl-dep { opacity: .12; } .chart.dep-focus .tl-dep.hl { opacity: 1; stroke-width: 2.6; } .chart.no-deps .tl-deps { display: none; }
 .legend span.sw-line { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--muted); margin-right: 5px; vertical-align: 3px; }
 .legend span.sw-line.holding { border-top-color: var(--warn); } .legend span.sw-line.conflict { border-top: 2px dashed var(--bad); }
+/* Baselines: the planned dates sit as a thin bar under the live one; a slip is written beside it. */
+.chart .tl-ghost { fill: var(--muted); opacity: .65; pointer-events: none; }
+.chart .tl-ms-ghost { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 3 2; pointer-events: none; }
+svg.chart .tl-slip { font-weight: 700; pointer-events: none; } svg.chart .tl-slip.late { fill: var(--bad); } svg.chart .tl-slip.ahead { fill: var(--ok); }
+.legend span.sw-ghost { display: inline-block; width: 18px; height: 4px; border-radius: 2px; background: var(--muted); opacity: .65; margin-right: 5px; vertical-align: 2px; }
+.kpi.ok .value { color: var(--ok); }
+@media (max-width: 600px) { #baseline-kpis { grid-template-columns: repeat(2, 1fr); gap: 10px; } #baseline-kpis .kpi .value { font-size: 22px; } }
 .util-cell { min-width: 140px; }
 
 /* custom project fields */

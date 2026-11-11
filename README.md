@@ -27,6 +27,9 @@ standard library alone - **no packages to install, no build step** - and stores 
   dependencies, priorities and each person's capacity across all projects at once, and tells you which tasks *will* miss their
   dates, by how many days and why, while there is still time to act, and which single reassignment would help most.
   See [Delivery projection](#delivery-projection).
+- **Baselines: plan versus actual** - freeze a project's plan, then see how far it has drifted: which tasks and milestones slipped and by
+  how many days, what was added or dropped, how the scope and the finish date moved, with the planned dates drawn under the live bars
+  on the timeline. See [Baselines](#baselines).
 - **Workload and capacity** - estimated work due in the next N weeks vs each person's weekly capacity, with overallocation flagged.
 - **Burndown, critical path, timesheets, digests** - computed live from the data.
 - **Roles and an audit trail** - viewer / member / manager / admin, per-project membership, and a field-level history of every change.
@@ -276,6 +279,50 @@ holidays, and a task flagged *blocked* is assumed to unblock now (the task says 
 answer is. It does not change health (which stays rule-based and explainable), nothing is stored, and every number is computed from live
 data when you ask. More than 10,000 open tasks are refused with a clear error rather than answered slowly.
 
+## Baselines
+
+Health says how a project looks today and the projection says what will happen. Neither answers the first question a client or a sponsor
+asks: *are we where we said we would be?* A baseline is the other half of that answer: a frozen copy of the plan to compare the project with.
+
+**Setting one.** Managers and admins use **Set baseline...** on the *Reports* tab (or `POST /api/projects/KEY/baselines`). It records, for every
+task that is not cancelled, the title, start and due date, estimate and status (and the day it was completed, when it is done) and the project's
+milestones with their dates, exactly as they are at that moment. A baseline has a name, which is unique within the project (`Baseline 1`,
+`Baseline 2`... when you give none), and an optional note. It is never edited, only deleted, and a project can have ten, for example *Signed-off
+plan* and *After the re-plan*. Setting and deleting one is written to the project's activity and can be sent to webhooks.
+
+**What it compares.** The project as it is now is laid over the baseline, and every number can be traced to a rule:
+
+- Only tasks without subtasks are compared: a parent has no work of its own, and counting it would count its subtasks twice. Tasks are matched
+  by number, which is never reused, so a new task can never be mistaken for an old one, and deleting a task never changes what the baseline says.
+- A task's **finish** is the day it was completed (in the organisation's time zone) when it is done, otherwise its due date. A **slip** is the
+  finish now minus the finish in the baseline, in calendar days. So a task that was finished late has slipped even though nobody changed its due
+  date, a task that finishes early is *ahead*, and a task that was already done when the baseline was set can never slip.
+- An open task that is past its due date is flagged *overdue* but is not counted as slipped: nothing says when it will really finish. The
+  projection says that.
+- A task that was cancelled or deleted since is **dropped**, one that is new is **added**, and a task that has since been split into subtasks
+  is neither (its subtasks are added). A cancelled task that is reopened comes back as new work.
+- **Scope** is the sum of the estimates of those tasks (no estimate counts as 0 hours). The **finish** of the project is its latest task
+  finish, then and now.
+- Milestones are matched by identity, so renaming one does not make it a new milestone: each is *slipped*, *ahead*, *on plan* or *dropped*, and
+  new ones are listed.
+
+**Where you see it**
+
+- **Reports tab, "Plan vs. actual":** a headline in words (*The project now finishes 13 Nov, 4 days after the 9 Nov in the baseline. Of 11
+  tasks in the baseline, 6 slipped...*), tiles for the finish, slipped, moved earlier, on plan, added, dropped, scope and late milestones, the
+  ten biggest slips, every milestone, and the tasks added and dropped. The card compares with the newest baseline unless you pick another one.
+  Viewers see the comparison but not the buttons.
+- **Timeline:** choose a baseline in the header and each task whose dates moved gets its planned dates as a thin bar under the live one and the
+  slip written beside it (`+6d` in red, `-2d` in green); milestones that moved get a hollow diamond where they were planned. The choice *None*
+  draws the timeline as before. If the baselines cannot be loaded the timeline is still drawn, with a note.
+- **API:** `GET /api/projects/KEY/baselines/ID` returns the same comparison as data (see [docs/API.md](docs/API.md#baselines)).
+- **Demo:** `zylker-pm seed-demo` gives *Website Redesign* and *Mobile App v2* a baseline taken before their schedules started to slide.
+
+**What it is not.** A baseline holds dates, estimates, status and titles, not people, priorities or dependencies, so it says nothing about who
+was meant to do the work. Two baselines cannot be compared with each other, only each with the project as it is now. Baselines are not
+exported to or imported from Microsoft Project (its own baselines are not carried either, see below), they cannot be edited, and a project that
+has more than 10,000 tasks cannot be baselined. The comparison is computed from live data each time it is asked for, so it is always current.
+
 ## Zoho Cliq
 
 Set `ZYLKER_CLIQ_ENDPOINT` to your channel's incoming-webhook URL and the server posts, best effort and in the background (a
@@ -492,6 +539,6 @@ Dependencies are within one project, and lag/lead only flags dates - it never re
 informational and cannot be listed or filtered across the whole organisation yet; checklist items have no assignee or date and are not in the CSV export; watchers are named in the shared Cliq channel
 rather than messaged privately, and nobody is made a watcher automatically; bulk actions work from the List tab (not the board) and cover status, assignee, priority, labels, milestone and due date only;
 there are no custom fields on tasks (only on projects), recurring tasks or task templates; custom project fields cannot be reordered or filtered on yet; the burndown does not remember reopened
-tasks; the timeline's dependency arrows cannot be clicked and join only tasks that are on the chart, so a link to a parent task is counted but not drawn; SSO and per-project read permissions would be the natural next steps for a larger organisation.
+tasks; the timeline's dependency arrows cannot be clicked and join only tasks that are on the chart, so a link to a parent task is counted but not drawn; baselines cover dates, estimates and status only (not people, priorities or dependencies), cannot be edited or compared with each other, and are not exchanged with Microsoft Project; SSO and per-project read permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*

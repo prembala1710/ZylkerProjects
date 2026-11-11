@@ -42,6 +42,7 @@ EVENT_GROUPS = {
     "project_field": ("created", "updated", "deleted"),
     "comment": ("added", "edited", "deleted"),
     "attachment": ("added", "deleted"),
+    "baseline": ("created", "deleted"),
     "time": ("logged", "deleted"),
     "import": ("completed",),
 }
