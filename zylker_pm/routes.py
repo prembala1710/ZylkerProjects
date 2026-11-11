@@ -30,6 +30,7 @@ from .services import (
     activity,
     bulk,
     checklist,
+    clients,
     collab,
     csvio,
     deps,
@@ -75,7 +76,7 @@ def health(ctx, req):
     return {"status": "ok", "version": __version__}
 
 
-@route("GET", "/api/meta")
+@route("GET", "/api/meta", client=True)
 def meta(ctx, req):
     return {
         "version": __version__,
@@ -101,12 +102,17 @@ def meta(ctx, req):
         "max_watchers": MAX_WATCHERS,
         "bulk_max_tasks": BULK_MAX_TASKS,
         "bulk_fields": list(bulk.CHANGE_FIELDS),
+        "client_share_levels": list(clients.SHARE_LEVELS),
+        "client_limits": {"max_name_chars": clients.MAX_NAME_CHARS, "max_update_chars": clients.MAX_UPDATE_CHARS},
     }
 
 
-@route("GET", "/api/me")
+@route("GET", "/api/me", client=True)
 def me(ctx, req):
-    return users.public(ctx.user)
+    data = users.public(ctx.user)
+    if ctx.client is not None:  # a client contact: the portal is all it gets, and the page needs to know that
+        data["client"] = {"id": ctx.client["id"], "name": ctx.client["name"]}
+    return data
 
 
 # ---------------------------------------------------------------------------- users
@@ -446,11 +452,12 @@ def report_digest(ctx, req):
 
 # ----------------------------------------------------------------------- feature endpoints
 
-# Each module registers its own endpoints when it is imported: file attachments, baselines, the delivery projection and
-# the Microsoft Project export and import.
+# Each module registers its own endpoints when it is imported: file attachments, baselines, MSP clients and the client
+# portal, the delivery projection and the Microsoft Project export and import.
 from . import (  # noqa: E402
     attachment_routes,  # noqa: F401
     baseline_routes,  # noqa: F401
+    client_routes,  # noqa: F401
     msproject_routes,  # noqa: F401
     projection_routes,  # noqa: F401
 )

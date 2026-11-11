@@ -90,6 +90,8 @@ def _active_user(conn, username, field):
     user = users.find_by_username(conn, username)
     if user is None or not user["active"]:
         raise ValidationError({field: "unknown or inactive user %r" % username})
+    if users.is_client_contact(conn, user["id"]):
+        raise ValidationError({field: "%r is a client contact and cannot take part in projects" % username})
     return user
 
 

@@ -25,7 +25,7 @@ from .errors import (
     PayloadTooLarge,
     UnsupportedMediaType,
 )
-from .services import attachments, baselines
+from .services import attachments, baselines, clients
 
 log = logging.getLogger("zylker.access")
 
@@ -124,9 +124,9 @@ class Request:
 
 
 class Route:
-    def __init__(self, method, pattern, handler, role, public, body_limit, prefetch=False):
+    def __init__(self, method, pattern, handler, role, public, body_limit, prefetch=False, client=False):
         self.method, self.pattern, self.handler = method, pattern, handler
-        self.role, self.public, self.body_limit, self.prefetch = role, public, body_limit, prefetch
+        self.role, self.public, self.body_limit, self.prefetch, self.client = role, public, body_limit, prefetch, client
         parts = re.split(r"(\{\w+\})", pattern)
         self.regex = re.compile(
             "^" + "".join("(?P<%s>[^/]+)" % p[1:-1] if p.startswith("{") else re.escape(p) for p in parts) + "$"
@@ -136,8 +136,11 @@ class Route:
 ROUTES: list[Route] = []
 
 
-def route(method, pattern, role="viewer", public=False, body_limit=None, prefetch=False):
+def route(method, pattern, role="viewer", public=False, body_limit=None, prefetch=False, client=False):
     """Register a handler ``fn(ctx, req, **path_params)`` with a minimum role.
+
+    ``client=True`` marks the few routes that a client-portal account (see ``services.clients``) may call. Every other route
+    refuses such an account, so a route that forgets to say anything is closed to clients, never open.
 
     ``prefetch=True`` makes the server read the whole request body *before* the database transaction starts. Writers
     hold SQLite's single write lock from ``BEGIN IMMEDIATE`` on, so a route that takes a large body (a file upload)
@@ -145,7 +148,7 @@ def route(method, pattern, role="viewer", public=False, body_limit=None, prefetc
     """
 
     def decorator(fn):
-        ROUTES.append(Route(method, pattern, fn, role, public, body_limit, prefetch))
+        ROUTES.append(Route(method, pattern, fn, role, public, body_limit, prefetch, client))
         return fn
 
     return decorator
@@ -161,6 +164,7 @@ class App:
         self.tz = get_tz(config.timezone)
         attachments.ensure_schema(config.db_path)  # additive tables for databases created before attachments existed
         baselines.ensure_schema(config.db_path)  # ... and before baselines existed
+        clients.ensure_schema(config.db_path)  # ... and before clients existed
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.notifier = notifier if notifier is not None else notify.build_notifier(config)
         webhooks.ensure_schema(config.db_path)  # additive tables for databases created before webhooks existed
@@ -232,9 +236,15 @@ class App:
         req.check_size(limit)
         conn = connect(self.config.db_path)
         try:
-            user = None
+            user, client = None, None
             if not r.public:
                 user = auth.authenticate(conn, req.authorization)
+                client = clients.restriction(conn, user["id"])
+                if client is not None:  # a client contact: closed to everything that does not say it is for clients
+                    if not client["active"]:
+                        raise Forbidden("This client account is suspended", code="client_suspended")
+                    if not r.client:
+                        raise Forbidden("Client accounts can only use the client portal", code="client_access_denied")
                 if ROLE_RANK[user["role"]] < ROLE_RANK[r.role]:
                     raise Forbidden(
                         "This action requires the %r role or higher (you are %r)" % (r.role, user["role"]),
@@ -244,6 +254,7 @@ class App:
                 req.body()
             with transaction(conn, write=req.method not in ("GET", "HEAD")):
                 ctx = Context(conn, user, self.clock(), self.tz, self.config)
+                ctx.client = client
                 result = r.handler(ctx, req, **params)
             notify.dispatch(self.notifier, ctx.events, self.config.public_url)
         finally:

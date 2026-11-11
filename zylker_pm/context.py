@@ -22,6 +22,7 @@ class Context:
         self.tz = tz
         self.config = config
         self.events: list[tuple[str, dict]] = []
+        self.client = None  # for a client-portal account: {"id", "name", "active"} (set by the app); None for staff
 
     @property
     def now_iso(self) -> str:
