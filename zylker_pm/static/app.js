@@ -56,7 +56,7 @@ const DEP_TYPE_HELP = {
 const LINK_LABEL = { relates_to: 'relates to', duplicates: 'duplicates', duplicated_by: 'is duplicated by', cloned_from: 'is cloned from', cloned_to: 'was cloned to' };
 const lagText = (n) => (!n ? '' : n > 0 ? `${n}d lag` : `${-n}d lead`);
 
-const state = { token: null, me: null, meta: null, users: [], projects: [], fields: [], today: '', pendingTask: null, projectCache: {}, baselineChoice: {} };
+const state = { token: null, me: null, meta: null, users: [], projects: [], fields: [], today: '', pendingTask: null, projectCache: {}, baselineChoice: {}, portalDays: 7 };
 
 const parseDate = (s) => { if (!s) return null; const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const dayDiff = (a, b) => Math.round((parseDate(b) - parseDate(a)) / 86400000);
@@ -137,6 +137,7 @@ async function api(path, opts = {}) {
   let data = null;
   try { data = await res.json(); } catch (e) { /* not JSON */ }
   if (res.status === 401 && state.me) signOut('Your session has ended. Please sign in again.'); // not while signing in
+  if (res.status === 403 && state.me && state.me.client && data && data.error && data.error.code === 'client_suspended') signOut(data.error.message);
   if (!res.ok) throw new ApiError(res.status, data && data.error);
   return data;
 }
@@ -292,7 +293,7 @@ function showLogin(message) {
       await loadSession();
       saveToken(state.token, remember.checked);
       renderShell();
-      location.hash = '#/dashboard';
+      location.hash = state.me.client ? '#/portal' : '#/dashboard';
       route();
     } catch (err) {
       state.token = null;
@@ -311,7 +312,9 @@ const logo = () => sv('svg', { width: 28, height: 28, viewBox: '0 0 32 32', 'ari
   sv('path', { d: 'M9 10h14l-9 12h9', fill: 'none', stroke: '#fff', 'stroke-width': 3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
 
 async function loadSession() {
-  const [me, meta, users, projects, fields] = await Promise.all([api('/me'), api('/meta'), api('/users'), api('/projects'), api('/project-fields')]);
+  const [me, meta] = await Promise.all([api('/me'), api('/meta')]);
+  if (me.client) { Object.assign(state, { me, meta, users: [], projects: [], fields: [], today: meta.today }); return; } // a client contact gets the portal and nothing else
+  const [users, projects, fields] = await Promise.all([api('/users'), api('/projects'), api('/project-fields')]);
   Object.assign(state, { me, meta, users: users.items, projects: projects.items, fields: fields.items, today: meta.today });
 }
 async function refreshProjects() {
@@ -327,6 +330,7 @@ async function getProject(key) {
 function renderShell() {
   const root = $('#root');
   clear(root);
+  if (state.me.client) return renderPortalShell();
   const searchBox = h('input', { type: 'search', placeholder: 'Search tasks by title or key\u2026', 'aria-label': 'Search tasks', autocomplete: 'off' });
   const results = h('div', { class: 'search-results hidden' });
   let timer;
@@ -353,6 +357,7 @@ function renderShell() {
     h('a', { class: 'nav-link', href: '#/dashboard', dataset: { route: 'dashboard' } }, 'Dashboard'),
     h('a', { class: 'nav-link', href: '#/mine', dataset: { route: 'mine' } }, 'My tasks'),
     h('a', { class: 'nav-link', href: '#/team', dataset: { route: 'team' } }, 'Team workload'),
+    h('a', { class: 'nav-link', href: '#/clients', dataset: { route: 'clients' } }, 'Clients'),
     h('div', { class: 'nav-heading', text: 'Projects' }),
     h('div', { id: 'project-nav' }),
     hasRole('manager') ? h('button', { class: 'btn small', style: { margin: '8px 10px' }, onclick: openCreateProject }, '+ New project') : null,
@@ -389,9 +394,19 @@ async function route() {
   const view = $('#view');
   if (!view) return;
   highlightNav();
-  const [a, b, c] = (location.hash.replace(/^#\/?/, '') || 'dashboard').split('/');
+  const [a, b, c, d] = (location.hash.replace(/^#\/?/, '') || (state.me.client ? 'portal' : 'dashboard')).split('/');
   try {
-    if (a === 'p' && b) await projectView(view, b.toUpperCase(), c || 'board', alive);
+    if (state.me.client) { // a client contact has the portal and nothing else
+      const scope = { query: {}, base: '#/portal' };
+      if (a === 'portal' && b) await portalProject(view, b.toUpperCase(), scope, alive);
+      else if (a === 'portal') await portalHome(view, scope, alive);
+      else location.replace('#/portal');
+    } else if (a === 'clients' && /^\d+$/.test(b || '') && c === 'portal') {
+      const scope = { query: { client: b }, base: `#/clients/${b}/portal`, preview: true };
+      if (d) await portalProject(view, d.toUpperCase(), scope, alive); else await portalHome(view, scope, alive);
+    } else if (a === 'clients' && b) await clientView(view, b, alive);
+    else if (a === 'clients') await clientsView(view, alive);
+    else if (a === 'p' && b) await projectView(view, b.toUpperCase(), c || 'board', alive);
     else if (a === 't' && b) { state.pendingTask = b.toUpperCase(); const t = await api('/tasks/' + state.pendingTask); location.replace('#/p/' + t.project + '/board'); }
     else if (a === 'webhooks' && hasRole('admin')) await webhooksView(view, alive);
     else if (a === 'mine') await myTasksView(view, alive);
@@ -475,7 +490,7 @@ function workloadCard(workload) {
 }
 
 /* ============================== webhooks (admin) ============================== */
-const WEBHOOK_GROUP_LABEL = { project: 'Projects', milestone: 'Milestones', task: 'Tasks', checklist: 'Checklists', watcher: 'Watchers', project_field: 'Project fields', comment: 'Comments', attachment: 'Attachments', time: 'Time tracking', baseline: 'Baselines', import: 'Imports' };
+const WEBHOOK_GROUP_LABEL = { project: 'Projects', milestone: 'Milestones', task: 'Tasks', checklist: 'Checklists', watcher: 'Watchers', project_field: 'Project fields', comment: 'Comments', attachment: 'Attachments', time: 'Time tracking', baseline: 'Baselines', client: 'Clients', import: 'Imports' };
 const DELIVERY_BADGE = { succeeded: ['done', 'Delivered'], failed: ['blocked', 'Failed'], pending: ['todo', 'Queued'], sending: ['in_progress', 'Sending'] };
 const DELIVERY_ERROR = { timeout: 'timed out', connection_failed: 'could not connect', dns_error: 'host name did not resolve', tls_error: 'TLS certificate problem',
   blocked_address: 'address is private (blocked)', protocol_error: 'invalid HTTP response', invalid_request: 'invalid request', internal_error: 'internal error',
@@ -1382,6 +1397,9 @@ function describeActivity(a) {
     case 'project.member_removed': return `removed ${d.user} from the project`;
     case 'baseline.created': return `set the baseline \u201c${d.name}\u201d (${plural(d.tasks, 'task')}, ${plural(d.milestones, 'milestone')})`;
     case 'baseline.deleted': return `deleted the baseline \u201c${d.name}\u201d`;
+    case 'client.project_linked': return `linked the project to the client \u201c${d.client}\u201d (shared: ${(SHARE_LABEL[d.share] || d.share).toLowerCase()})`;
+    case 'client.project_updated': return `changed what the client \u201c${d.client}\u201d sees of the project (${Object.entries(d.changes || {}).map(([f, [o, n]]) => (f === 'update' ? 'message for the client changed' : `sharing: ${(SHARE_LABEL[o] || o).toLowerCase()} \u2192 ${(SHARE_LABEL[n] || n).toLowerCase()}`)).join('; ')})`;
+    case 'client.project_unlinked': return `removed the project from the client \u201c${d.client}\u201d`;
     case 'import.completed': return `imported tasks from ${d.source === 'msproject' ? 'Microsoft Project' : 'CSV'}: ${d.created} created, ${d.skipped_duplicates} skipped, ${d.errors} errors`;
     default: return a.action;
   }
@@ -2054,6 +2072,182 @@ function deleteFieldDialog(def) {
   input.addEventListener('input', () => { go.disabled = input.value !== def.key; });
   const m = openModal({ title: `Delete \u201c${def.label}\u201d?`, narrow: true, content: h('div', { class: 'stack' },
     h('p', { text: `This removes the field and its value from every project. It cannot be undone. Type ${def.key} to confirm.` }), input), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), go] });
+}
+
+/* ============================== clients (MSP) ============================== */
+const SHARE_LABEL = { none: 'Not shared', summary: 'Summary', full: 'Full status' };
+const SHARE_HELP = { none: 'Nothing about the project reaches the client.', summary: 'Its rating, progress, milestones and your message.', full: 'The summary, the forecast and what happened, task by task.' };
+const CONTACT_SIGN = 'A contact signs in with a token of its own and sees only the projects shared with its client. Contacts cannot be removed, only deactivated.';
+const forecastCell = (f) => (!f ? h('span', { class: 'muted', text: '\u2014' })
+  : f.verdict === 'will_miss' ? badge('off_track', `${plural(f.late_by_days, 'day')} late`, `${plural(f.late_tasks, 'task')} will miss their own dates`)
+  : f.verdict === 'on_track' ? badge('on_track', 'On time', f.late_tasks ? `${plural(f.late_tasks, 'task')} will miss their own dates` : null)
+  : f.verdict === 'unknown' ? badge('on_hold', 'Unknown') : h('span', { class: 'muted', text: 'No due date' }));
+
+async function clientsView(view, alive) {
+  const data = await api('/clients');
+  if (!alive()) return;
+  clear(view);
+  const attention = data.items.filter((c) => c.active && (c.health === 'off_track' || c.health === 'at_risk')).length;
+  const sum = (f) => data.items.reduce((n, c) => n + f(c), 0);
+  view.append(h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('h1', { text: 'Clients' }),
+    h('p', { class: 'muted', text: 'The organisations you work for, the ones that need attention first. Each client signs in to a portal that shows only the projects you share with it.' })),
+    hasRole('manager') ? h('button', { class: 'btn primary', id: 'client-new', onclick: () => openClientForm(null) }, '+ New client') : null),
+    h('div', { class: 'grid kpis', id: 'clients-kpis', style: { marginBottom: '16px' } }, kpi('Clients', data.items.length), kpi('Need attention', attention, attention ? 'warn' : ''),
+      kpi('Shared projects', sum((c) => c.projects.shared)), kpi('Contacts', sum((c) => c.contacts))),
+    data.items.length
+      ? h('div', { class: 'card flush' }, h('table', { class: 'table', id: 'clients-table', 'aria-label': 'Clients' },
+        h('thead', {}, h('tr', {}, ['Client', 'Health', 'Forecast', 'Projects', 'Open tasks', 'Overdue', 'Contacts'].map((x) => h('th', { text: x })))),
+        h('tbody', {}, data.items.map((c) => h('tr', { class: 'click', onclick: (e) => { if (!e.target.closest('a')) location.hash = '#/clients/' + c.id; } },
+          h('td', {}, h('a', { href: '#/clients/' + c.id }, h('strong', { text: c.name })), ' ', c.active ? null : badge('archived', 'Suspended')),
+          h('td', {}, c.health ? badge(c.health, HEALTH_LABEL[c.health]) : h('span', { class: 'muted', text: '\u2014' })), h('td', {}, forecastCell(c.forecast)),
+          h('td', { text: `${c.projects.total} (${c.projects.shared} shared)` }), h('td', { text: c.projects.open_tasks }),
+          h('td', { class: c.projects.overdue_tasks ? 'overdue-text' : '', text: c.projects.overdue_tasks }), h('td', { text: c.contacts }))))))
+      : h('div', { class: 'card empty', text: 'No clients yet. Create one, link its projects and decide what it may see.' }));
+}
+
+function openClientForm(existing) {
+  const name = h('input', { type: 'text', maxlength: 80, required: true, value: existing ? existing.name : '', 'aria-label': 'Client name', onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); save.click(); } } });
+  const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => {
+    const made = await api(existing ? `/clients/${existing.id}` : '/clients', { method: existing ? 'PATCH' : 'POST', body: { name: name.value } });
+    m.close();
+    if (existing) route(); else location.hash = '#/clients/' + made.id;
+  }) }, existing ? 'Save' : 'Create client');
+  const m = openModal({ title: existing ? 'Rename client' : 'New client', narrow: true, content: h('div', { class: 'stack' }, field('Name', name, 'As you would write it on an invoice.')), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
+}
+
+function openMessageForm(client, link) {
+  const text = h('textarea', { maxlength: 1000, rows: 5, 'aria-label': 'Message for the client' }, link.update ? link.update.text : '');
+  const send = (value, done) => guarded(done, async () => { await api(`/clients/${client.id}/projects/${link.key}`, { method: 'PUT', body: { update: value } }); m.close(); route(); });
+  const save = h('button', { class: 'btn primary', onclick: () => send(text.value.trim() || null, save) }, 'Save message');
+  const clearIt = link.update ? h('button', { class: 'btn danger', onclick: () => send(null, clearIt) }, 'Take it down') : null;
+  const m = openModal({ title: `Message for ${client.name} about ${link.key}`, content: h('div', { class: 'stack' },
+    h('p', { class: 'small muted', text: 'The client sees this at the top of the project, with your name and the date. Write it for the client: it is not an internal note.' }), field('Message', text)),
+    footer: [clearIt, h('span', { class: 'spacer' }), h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
+}
+
+function openContactForm(client) {
+  const f = { username: h('input', { type: 'text', maxlength: 32, required: true, placeholder: 'lowercase, e.g. rita.acme' }), display_name: h('input', { type: 'text', maxlength: 100, required: true }), email: h('input', { type: 'email' }) };
+  const create = h('button', { class: 'btn primary', onclick: () => guarded(create, async () => {
+    const body = { username: f.username.value, display_name: f.display_name.value };
+    if (f.email.value) body.email = f.email.value;
+    const made = await api(`/clients/${client.id}/contacts`, { method: 'POST', body });
+    m.close(); showToken(made.contact.username, made.token); route();
+  }) }, 'Create contact');
+  const m = openModal({ title: `New contact at ${client.name}`, narrow: true, content: h('div', { class: 'stack' }, h('p', { class: 'small muted', text: CONTACT_SIGN }),
+    field('Username', f.username), field('Display name', f.display_name), field('E-mail (optional)', f.email)), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), create] });
+}
+
+async function clientView(view, id, alive) {
+  const client = await api('/clients/' + id);
+  if (!alive()) return;
+  clear(view);
+  const manage = hasRole('manager'), admin = hasRole('admin');
+  const put = (key, body, button) => guarded(button, async () => { await api(`/clients/${client.id}/projects/${key}`, { method: 'PUT', body }); route(); });
+  const addSel = h('select', { id: 'client-add-project', 'aria-label': 'Project to add' }, optionList([['', client.available_projects.length ? 'Choose a project\u2026' : 'No project is free'], ...client.available_projects.map((p) => [p.key, `${p.key} \u00b7 ${p.name}`])]));
+  const addShare = h('select', { id: 'client-add-share', 'aria-label': 'What the client sees of it' }, optionList(Object.entries(SHARE_LABEL)));
+  const addBtn = h('button', { class: 'btn primary', id: 'client-add-go', onclick: () => { if (addSel.value) put(addSel.value, { share: addShare.value }, addBtn); } }, 'Add project');
+  const projectRow = (p) => h('tr', { dataset: { project: p.key } },
+    h('td', {}, h('a', { href: '#/p/' + p.key }, h('strong', { text: p.key })), ' ', p.name),
+    h('td', {}, p.health ? healthBadge(p.health) : badge('archived', 'Archived')), h('td', {}, p.progress_pct === null ? '\u2014' : h('div', { class: 'row' }, progressBar(p.progress_pct, 'ok'), h('span', { class: 'small', text: `${Math.round(p.progress_pct)}%` }))),
+    h('td', {}, manage ? h('select', { class: 'inline share', 'aria-label': `What ${client.name} sees of ${p.key}`, title: SHARE_HELP[p.share], value: p.share,
+      onchange: (e) => put(p.key, { share: e.target.value }, e.target) }, optionList(Object.entries(SHARE_LABEL))) : h('span', { text: SHARE_LABEL[p.share] })),
+    h('td', { class: 'small' }, p.update ? h('span', { class: 'update-text', title: p.update.text, text: p.update.text.length > 60 ? p.update.text.slice(0, 59) + '\u2026' : p.update.text }) : h('span', { class: 'muted', text: 'None' }), ' ',
+      manage ? h('button', { class: 'btn small', onclick: () => openMessageForm(client, p) }, p.update ? 'Edit' : 'Write\u2026') : null),
+    h('td', { class: 'right' }, manage ? h('button', { class: 'btn small danger', onclick: async (e) => { if (await confirmBox(`Remove ${p.key} from ${client.name}? It disappears from their portal at once; the project is not touched.`, 'Remove', true)) guarded(e.target, async () => { await api(`/clients/${client.id}/projects/${p.key}`, { method: 'DELETE' }); route(); }); } }, 'Remove') : null));
+  const contactRow = (c) => h('tr', { dataset: { contact: c.username } },
+    h('td', {}, h('div', { class: 'row' }, avatar(c), h('div', {}, h('strong', { text: c.display_name }), h('div', { class: 'small muted', text: `${c.username}${c.email ? ' \u00b7 ' + c.email : ''}` })))),
+    h('td', {}, badge(c.active ? 'active' : 'archived', c.active ? 'Active' : 'Deactivated')),
+    h('td', { class: 'right nowrap' }, admin ? [h('button', { class: 'btn small', onclick: async (e) => { if (await confirmBox(`Issue a new token for ${c.display_name}? Their current token stops working immediately.`, 'Issue new token')) guarded(e.target, async () => { const r = await api(`/clients/${client.id}/contacts/${c.id}/rotate-token`, { method: 'POST' }); showToken(c.username, r.token); }); } }, 'New token'), ' ',
+      h('button', { class: 'btn small ' + (c.active ? 'danger' : ''), onclick: (e) => guarded(e.target, async () => { await api(`/clients/${client.id}/contacts/${c.id}`, { method: 'PATCH', body: { active: !c.active } }); route(); }) }, c.active ? 'Deactivate' : 'Reactivate')] : null));
+  view.append(h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('div', { class: 'row wrap' }, h('h1', { id: 'client-name', text: client.name }), badge(client.active ? 'active' : 'archived', client.active ? 'Active' : 'Suspended')),
+    h('p', { class: 'muted' }, h('a', { href: '#/clients' }, '\u2190 All clients'), client.active ? '' : ' \u00b7 Suspended: its contacts cannot sign in.')),
+    h('div', { class: 'row wrap' }, h('a', { class: 'btn', id: 'client-preview', href: `#/clients/${client.id}/portal` }, 'Preview portal'),
+      manage ? h('button', { class: 'btn', id: 'client-rename', onclick: () => openClientForm(client) }, 'Rename\u2026') : null,
+      manage ? h('button', { class: 'btn ' + (client.active ? 'danger' : ''), id: 'client-suspend', onclick: async (e) => { if (!client.active || await confirmBox(`Suspend ${client.name}? Its contacts are signed out at once and cannot sign in until you reactivate it.`, 'Suspend', true)) guarded(e.target, async () => { await api('/clients/' + client.id, { method: 'PATCH', body: { active: !client.active } }); route(); }); } }, client.active ? 'Suspend' : 'Reactivate') : null,
+      admin ? h('button', { class: 'btn danger', id: 'client-delete', disabled: client.contacts.length > 0, title: client.contacts.length ? 'A client with contacts cannot be deleted; suspend it instead' : null,
+        onclick: async (e) => { if (await confirmBox(`Delete ${client.name}? Its projects are not touched.`, 'Delete', true)) guarded(e.target, async () => { await api('/clients/' + client.id, { method: 'DELETE' }); location.hash = '#/clients'; }); } }, 'Delete\u2026') : null)),
+    h('div', { class: 'card flush', id: 'client-projects' }, h('div', { style: { padding: '12px 16px 0' } }, h('h2', { text: 'Projects' }),
+      h('p', { class: 'small muted', text: 'A project is not shared until you choose what the client sees of it. Summary: rating, progress, milestones and your message. Full status: also the forecast and what happened, task by task.' })),
+      client.projects.length ? h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['Project', 'Health', 'Progress', 'The client sees', 'Message for the client', ''].map((x) => h('th', { text: x })))), h('tbody', {}, client.projects.map(projectRow)))
+        : h('div', { class: 'empty small', style: { padding: '12px 16px' }, text: 'No project is linked to this client yet.' }),
+      manage ? h('div', { class: 'form-row', style: { padding: '12px 16px' } }, addSel, addShare, addBtn) : null),
+    h('div', { class: 'card flush', id: 'client-contacts', style: { marginTop: '16px' } }, h('div', { class: 'row', style: { padding: '12px 16px 0' } }, h('h2', { text: 'Contacts' }), h('span', { class: 'spacer' }),
+      admin ? h('button', { class: 'btn small primary', id: 'contact-new', onclick: () => openContactForm(client) }, 'Add contact\u2026') : null),
+      h('p', { class: 'small muted', style: { padding: '0 16px' }, text: CONTACT_SIGN }),
+      client.contacts.length ? h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['Contact', 'Status', ''].map((x) => h('th', { text: x })))), h('tbody', {}, client.contacts.map(contactRow)))
+        : h('div', { class: 'empty small', style: { padding: '12px 16px' }, text: 'No contact yet: nobody can sign in for this client.' })));
+}
+
+/* ============================== client portal ============================== */
+function renderPortalShell() {
+  const root = $('#root');
+  clear(root);
+  root.append(h('div', { class: 'portal' }, h('header', { class: 'portal-top' }, h('div', { class: 'brand' }, logo(), 'Zylker Projects'), h('span', { class: 'chip', text: 'Client portal' }), h('span', { class: 'spacer' }),
+    avatar(state.me), h('div', { class: 'user-chip' }, h('div', { text: state.me.display_name }), h('div', { class: 'small muted', text: state.me.client.name })),
+    h('button', { class: 'btn small', onclick: () => signOut('You have been signed out.') }, 'Sign out')),
+    h('main', { class: 'portal-content', id: 'view', tabindex: '-1' })));
+}
+const previewBanner = (scope, name) => h('div', { class: 'preview-banner', id: 'portal-banner', role: 'note' }, h('strong', { text: 'Preview. ' }), `This is what ${name}\u2019s contacts see. `, h('a', { href: `#/clients/${scope.query.client}` }, `Back to ${name}`));
+const listOf = (section, render, empty) => (section.count ? [h('ul', { class: 'plain' }, section.items.map((i) => h('li', {}, render(i)))), section.more ? h('p', { class: 'small muted', text: `\u2026and ${section.more} more` }) : null] : h('p', { class: 'small muted', text: empty }));
+const taskRef = (i) => [h('strong', { text: i.key }), ' ', i.title];
+
+async function portalHome(view, scope, alive) {
+  const data = await api('/portal/projects', { query: scope.query });
+  if (!alive()) return;
+  clear(view);
+  if (scope.preview) view.append(previewBanner(scope, data.client.name));
+  view.append(h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('h1', { id: 'portal-title', text: scope.preview ? `${data.client.name}: projects` : 'Your projects' }),
+    h('p', { class: 'muted', text: data.items.length ? 'Where each project stands today. Open one for the detail.' : '' }))),
+    data.items.length
+      ? h('div', { class: 'grid portal-cards', id: 'portal-projects' }, data.items.map((p) => h('a', { class: 'card portal-card', href: `${scope.base}/${p.key}`, dataset: { key: p.key } },
+        h('div', { class: 'row' }, h('h2', { text: p.name }), h('span', { class: 'spacer' }), healthBadge(p.rating)),
+        h('p', { class: 'small muted', text: `${p.key} \u00b7 ${p.owner ? 'managed by ' + p.owner + ' \u00b7 ' : ''}due ${fmtDate(p.due_date)}` }),
+        h('div', { class: 'row' }, progressBar(p.progress.percent, 'ok'), h('strong', { text: `${Math.round(p.progress.percent)}%` })),
+        h('p', { class: 'small muted', text: `${p.progress.done} of ${plural(p.progress.total, 'task')} done` + (p.next_milestone ? ` \u00b7 next milestone: ${p.next_milestone.name}, ${fmtDate(p.next_milestone.due_date)}${p.next_milestone.status === 'overdue' ? ' (overdue)' : ''}` : '')}),
+        p.update ? h('blockquote', { class: 'update small', text: p.update.text }) : null)))
+      : h('div', { class: 'card empty', id: 'portal-empty', text: 'Nothing has been shared with you yet. Your project manager decides what appears here.' }));
+}
+
+async function portalProject(view, key, scope, alive) {
+  const data = await api('/portal/projects/' + key, { query: { ...scope.query, days: state.portalDays } });
+  if (!alive()) return;
+  clear(view);
+  const full = data.level === 'full', t = data.progress.tasks, pp = data.progress.period;
+  const days = h('select', { id: 'portal-days', class: 'inline', 'aria-label': 'Period', value: String(state.portalDays), onchange: (e) => { state.portalDays = Number(e.target.value); route(); } },
+    optionList([['7', 'Last 7 days'], ['14', 'Last 14 days'], ['30', 'Last 30 days']]));
+  if (scope.preview) view.append(previewBanner(scope, data.client.name));
+  view.append(h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('p', { class: 'small portal-tools' }, h('a', { href: scope.base }, '\u2190 All projects')),
+    h('div', { class: 'row wrap' }, h('h1', { id: 'portal-title', text: data.project.name }), healthBadge(data.rating)),
+    h('p', { class: 'muted', text: `${data.project.key} \u00b7 ${data.project.owner ? 'managed by ' + data.project.owner + ' \u00b7 ' : ''}${fmtDate(data.project.start_date)} \u2192 ${fmtDate(data.project.due_date)}` })),
+    h('div', { class: 'row portal-tools' }, h('label', { class: 'row small' }, 'Period', days), h('button', { class: 'btn', id: 'portal-print', onclick: () => window.print() }, 'Print / save as PDF'))),
+    data.update ? h('div', { class: 'card update-card', id: 'portal-update' }, h('div', { class: 'small muted', text: `From ${data.update.by || 'your project manager'}, ${fmtDate(data.update.at.slice(0, 10))}` }), h('p', { style: { whiteSpace: 'pre-wrap' }, text: data.update.text })) : null,
+    h('div', { class: 'card', style: { marginTop: '16px' } }, h('p', { id: 'portal-headline', class: 'headline', text: data.headline }),
+      data.rating.reasons.length ? h('ul', { class: 'reasons', id: 'portal-reasons' }, data.rating.reasons.map((r) => h('li', { text: r }))) : null),
+    h('div', { class: 'grid kpis', id: 'portal-kpis', style: { marginTop: '16px' } }, kpi('Complete', `${Math.round(t.percent)}%`), kpi('Tasks done', `${t.done}/${t.total}`), kpi('Finished this period', pp.completed, pp.completed ? 'ok' : ''), kpi('Added this period', pp.added),
+      full ? kpi('Overdue', data.attention.overdue.count, data.attention.overdue.count ? 'bad' : '') : null, full ? kpi('Blocked', data.attention.blocked.count, data.attention.blocked.count ? 'warn' : '') : null),
+    h('div', { class: 'card flush', id: 'portal-milestones', style: { marginTop: '16px' } }, h('div', { style: { padding: '12px 16px 0' } }, h('h2', { text: 'Milestones' })),
+      data.milestones.items.length ? h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['Milestone', 'Due', 'Progress', 'Status'].concat(full ? ['Forecast'] : []).map((x) => h('th', { text: x })))),
+        h('tbody', {}, data.milestones.items.map((m) => h('tr', {}, h('td', { text: m.name }), h('td', { class: 'nowrap', text: fmtDate(m.due_date) }), h('td', { text: `${m.tasks_done}/${m.tasks_total} tasks` }),
+          h('td', {}, badge(m.status === 'overdue' ? 'overdue' : 'open_warn', m.status === 'overdue' ? 'Overdue' : 'Open')),
+          full ? h('td', { class: 'nowrap' }, m.projected_finish ? [fmtDate(m.projected_finish), m.late_by_days ? h('span', { class: 'overdue-text', text: ` (${plural(m.late_by_days, 'day')} late)` }) : ''] : '\u2014') : null))))
+        : h('div', { class: 'empty small', style: { padding: '12px 16px' }, text: data.milestones.achieved ? `All ${plural(data.milestones.achieved, 'milestone')} achieved.` : 'No milestones.' }),
+      data.milestones.more ? h('p', { class: 'small muted', style: { padding: '0 16px 12px' }, text: `\u2026and ${data.milestones.more} more` }) : null,
+      data.milestones.items.length && data.milestones.achieved ? h('p', { class: 'small muted', style: { padding: '0 16px 12px' }, text: `${plural(data.milestones.achieved, 'milestone')} already achieved.` }) : null));
+  if (!full) { view.append(h('p', { class: 'small muted', id: 'portal-summary-note', style: { marginTop: '16px' }, text: 'Your project manager shares a summary of this project. Ask them if you need the detail.' })); return; }
+  const f = data.forecast, ch = data.changes, ra = ch.rescheduled;
+  view.append(
+    h('div', { class: 'card', id: 'portal-forecast', style: { marginTop: '16px' } }, h('h2', { text: 'Forecast' }), h('p', { text: f.headline }),
+      f.late && f.late.count ? [h('p', { class: 'small muted', text: 'Expected to finish after their own dates:' }), listOf(f.late, (i) => [taskRef(i), h('span', { class: 'muted', text: ` \u2014 due ${fmtDate(i.due_date)}, expected ${fmtDate(i.projected_finish)} ` }), h('span', { class: 'overdue-text', text: `(+${i.late_by_days}d)` })], '')] : null),
+    h('div', { class: 'grid two', style: { marginTop: '16px' } },
+      h('div', { class: 'card', id: 'portal-overdue' }, h('h2', { text: `Overdue (${data.attention.overdue.count})` }), listOf(data.attention.overdue, (i) => [taskRef(i), h('span', { class: 'overdue-text', text: ` \u2014 ${plural(i.days_overdue, 'day')} overdue (due ${fmtDate(i.due_date)})` })], 'Nothing is overdue.')),
+      h('div', { class: 'card', id: 'portal-blocked' }, h('h2', { text: `Blocked (${data.attention.blocked.count})` }), listOf(data.attention.blocked, taskRef, 'Nothing is blocked.')),
+      h('div', { class: 'card', id: 'portal-completed' }, h('h2', { text: `Finished in the last ${data.period.days} days (${data.completed.count})` }), listOf(data.completed, (i) => [taskRef(i), h('span', { class: 'muted', text: ` \u2014 ${fmtDate(i.completed_on)}` })], 'Nothing was finished in this period.')),
+      h('div', { class: 'card', id: 'portal-upcoming' }, h('h2', { text: `Coming up in the next ${data.upcoming.days} days (${data.upcoming.count})` }), listOf(data.upcoming, (i) => [taskRef(i), h('span', { class: 'muted', text: ` \u2014 due ${fmtDate(i.due_date)}` })], 'Nothing is due in this period.'))),
+    h('div', { class: 'card', id: 'portal-changes', style: { marginTop: '16px' } }, h('h2', { text: `What changed in the last ${data.period.days} days` }),
+      h('h3', { text: `Dates moved (${ra.count}${ra.count ? `: ${ra.later} later, ${ra.earlier} earlier` : ''})`, style: { margin: '8px 0 4px' } }), listOf(ra, (i) => [taskRef(i), h('span', { class: i.days > 0 ? 'overdue-text' : 'ok-text', text: ` \u2014 ${fmtDate(i.from)} \u2192 ${fmtDate(i.to)} (${i.days > 0 ? '+' : '\u2212'}${Math.abs(i.days)}d)` })], 'No due date moved.'),
+      h('h3', { text: `Added (${ch.added.count})`, style: { margin: '12px 0 4px' } }), listOf(ch.added, (i) => [taskRef(i), h('span', { class: 'muted', text: ` \u2014 ${fmtDate(i.created_on)}` })], 'Nothing was added.'),
+      h('h3', { text: `Cancelled (${ch.cancelled.count})`, style: { margin: '12px 0 4px' } }), listOf(ch.cancelled, (i) => [taskRef(i), h('span', { class: 'muted', text: ` \u2014 ${fmtDate(i.cancelled_on)}` })], 'Nothing was cancelled.')),
+    h('p', { class: 'small muted', style: { marginTop: '16px' }, text: `As of ${fmtDate(data.as_of)}. The forecast is a projection from the plan and the team\u2019s capacity, not a promise.` }));
 }
 
 /* ============================== boot ============================== */

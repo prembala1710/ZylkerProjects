@@ -40,14 +40,26 @@ def find_by_username(conn, username):
     return conn.execute("SELECT * FROM users WHERE username = ?", (str(username).strip(),)).fetchone()
 
 
+_NOT_A_CONTACT = " id NOT IN (SELECT user_id FROM client_users)"
+
+
+def _has_contacts_table(conn):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'client_users'").fetchone() is not None
+
+
+def is_client_contact(conn, user_id) -> bool:
+    """True for a person on a client's side (see ``clients``): they are never staff, so they cannot join projects or be assigned work."""
+    return _has_contacts_table(conn) and conn.execute("SELECT 1 FROM client_users WHERE user_id = ?", (user_id,)).fetchone() is not None
+
+
 def find_by_identity(conn, text):
-    """Match username, e-mail or display name (case-insensitive); None if absent/ambiguous."""
+    """Match username, e-mail or display name (case-insensitive); None if absent/ambiguous. Client contacts never match."""
     text = (text or "").strip()
     if not text:
         return None
     rows = conn.execute(
-        "SELECT * FROM users WHERE username = ?1 COLLATE NOCASE OR email = ?1 COLLATE NOCASE "
-        "OR display_name = ?1 COLLATE NOCASE",
+        "SELECT * FROM users WHERE (username = ?1 COLLATE NOCASE OR email = ?1 COLLATE NOCASE "
+        "OR display_name = ?1 COLLATE NOCASE)" + (" AND" + _NOT_A_CONTACT if _has_contacts_table(conn) else ""),
         (text,),
     ).fetchall()
     return rows[0] if len(rows) == 1 else None
@@ -90,10 +102,14 @@ def create_user(ctx, data):
 
 
 def list_users(ctx, active=None):
-    sql, args = "SELECT * FROM users", []
+    """The staff. People on a client's side are managed from their client and are not listed here."""
+    where, args = [], []
     if active is not None:
-        sql += " WHERE active = ?"
+        where.append("active = ?")
         args.append(1 if active else 0)
+    if _has_contacts_table(ctx.conn):
+        where.append(_NOT_A_CONTACT.strip())
+    sql = "SELECT * FROM users" + (" WHERE " + " AND ".join(where) if where else "")
     return [public(r) for r in ctx.conn.execute(sql + " ORDER BY display_name COLLATE NOCASE", args)]
 
 
@@ -105,6 +121,8 @@ def _active_admin_count(conn, excluding_id):
 
 def update_user(ctx, user_id, data):
     target = get_row(ctx.conn, user_id)
+    if is_client_contact(ctx.conn, target["id"]):
+        raise Conflict("This is a client contact: manage it from its client", code="client_contact")
     is_admin = ctx.has_role("admin")
     is_self = ctx.user is not None and ctx.user["id"] == target["id"]
     if not (is_admin or is_self):

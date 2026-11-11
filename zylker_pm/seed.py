@@ -11,12 +11,19 @@ from contextlib import contextmanager
 from datetime import datetime, time, timedelta, timezone
 
 from . import notify
-from .services import baselines, checklist, collab, deps, links, milestones, project_fields, projects, tasks, users, watchers
+from .services import baselines, checklist, clients, collab, deps, links, milestones, project_fields, projects, tasks, users, watchers
 
 DEMO_FIELDS = [
     {"key": "client", "label": "Client", "type": "text", "max_length": 80, "description": "Who the work is for"},
     {"key": "budget_usd", "label": "Budget (USD)", "type": "number", "decimals": 0, "min_value": 0, "description": "Approved budget"},
     {"key": "wiki", "label": "Wiki", "type": "url", "description": "Where the project documentation lives"},
+]
+
+# The managed-service-provider view: two clients, each with a project in its portal and a contact who signs in with a token of its own.
+# (client, project, how much of it the portal shows, contact username, contact name, the manager's message to the client)
+DEMO_CLIENTS = [
+    ("Zylker Retail", "WEB", "full", "rita", "Rita Raman", "Design sign-off is done and the component library is in progress. A first look at the new homepage is planned for this week."),
+    ("Zylker Mobile", "APP", "summary", "milo", "Milo Park", "The TestFlight beta is later than planned. We are reorganising the work to protect the store submission date and will update you on Monday."),
 ]
 
 DEMO_USERS = [
@@ -209,6 +216,16 @@ def _seed(app, today):
         links.add_link(ctx, "WEB-8", {"type": "relates_to", "task": "APP-1"})
     with act("carol", 0) as ctx:
         watchers.add_watcher(ctx, "WEB-8", {})
+
+    # ------------------------------------------------- clients and their portal (INT is internal work: it has no client)
+    for name, project, share, username, display_name, message in DEMO_CLIENTS:
+        with act("alice", -20) as ctx:
+            client = clients.create_client(ctx, {"name": name})
+            clients.put_project(ctx, client["id"], project, {"share": share})
+            made = clients.create_contact(ctx, client["id"], {"username": username, "display_name": display_name})
+            tokens[username] = made["token"]
+        with act("alice", -1) as ctx:
+            clients.put_project(ctx, client["id"], project, {"update": message})
 
     at(0)
     return tokens
