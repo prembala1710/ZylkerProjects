@@ -25,7 +25,7 @@ from .errors import (
     PayloadTooLarge,
     UnsupportedMediaType,
 )
-from .services import attachments
+from .services import attachments, baselines
 
 log = logging.getLogger("zylker.access")
 
@@ -160,6 +160,7 @@ class App:
         self.config = config
         self.tz = get_tz(config.timezone)
         attachments.ensure_schema(config.db_path)  # additive tables for databases created before attachments existed
+        baselines.ensure_schema(config.db_path)  # ... and before baselines existed
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.notifier = notifier if notifier is not None else notify.build_notifier(config)
         webhooks.ensure_schema(config.db_path)  # additive tables for databases created before webhooks existed

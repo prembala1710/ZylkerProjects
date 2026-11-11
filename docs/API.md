@@ -55,6 +55,10 @@ Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric
 | `GET /api/projects/{key}/board` | viewer | Tasks grouped by status column; `?closed_days=14` hides older closed tasks (0 = all) |
 | `GET /api/projects/{key}/critical-path` | viewer | CPM over open, dependency-linked tasks: path, total effort, slack per task |
 | `GET /api/projects/{key}/dependencies` | viewer | Every dependency inside the project in one answer: both tasks, type, lag, whether it is holding the blocked task back, and the date hint - see [Listing a project's dependencies](#listing-a-projects-dependencies). This is what the timeline draws its arrows from |
+| `GET /api/projects/{key}/baselines` | viewer | The project's baselines, newest first, each with what it recorded; `limits.max_baselines` - see [Baselines](#baselines) |
+| `POST /api/projects/{key}/baselines` | manager | `{name?, note?}`: freezes the plan as it is now (`201`). The name defaults to `Baseline N`, is unique within the project (case-insensitive) and at most 60 characters; the note is at most 500. At most 10 per project |
+| `GET /api/projects/{key}/baselines/{baseline_id}` | viewer | The baseline and how the project compares with it today: task by task, milestones and the whole project - see [Baselines](#baselines) |
+| `DELETE /api/projects/{key}/baselines/{baseline_id}` | manager | Deletes the baseline (`204`); tasks and milestones are not touched |
 | `GET /api/projects/{key}/burndown` | viewer | `?metric=tasks\|hours` `?from=` `?to=` (YYYY-MM-DD, max 367 days). Daily remaining / scope / completed / ideal |
 | `GET /api/projects/{key}/activity` | viewer | `?limit=` (max 200) `?before=<activity id>`; `next_before` pages backwards |
 | `GET /api/projects/{key}/milestones` | viewer | With progress and `achieved` / `overdue` / `open` status |
@@ -362,6 +366,7 @@ counts failed *attempts* in a row and resets on the next success).
 | `comment` | `comment.added` `comment.edited` `comment.deleted` |
 | `attachment` | `attachment.added` `attachment.deleted` |
 | `time` | `time.logged` `time.deleted` |
+| `baseline` | `baseline.created` `baseline.deleted` |
 | `import` | `import.completed` (one event per CSV or Microsoft Project import, not one per row; `details` has `created`, `skipped_duplicates` and `errors`, and `"source": "msproject"` for Microsoft Project) |
 
 A status change is `task.status_changed`; `task.updated` is every other change. `<group>.*` also covers actions that later versions
@@ -504,6 +509,49 @@ sentence and `reassign`, the value to pass as `?reassign=` to see the whole pict
 queues, never at skills, and never changes anything.
 
 Errors: `422` for a malformed `capacity`, `overrun`, `reassign` or `limit`; `409 projection_too_large` when there are more than 10,000 open tasks.
+
+## Baselines
+
+A baseline is a frozen copy of a project's plan: for every task that is not cancelled, its title, start and due date, estimate, status and (when
+it is done) the day it was completed, and the project's milestones with their due dates, as they were when the baseline was set. It is never
+edited, only deleted. Comparing it with the project as it is now says what moved, which the projection (what *will* happen) cannot.
+
+`GET /api/projects/{key}/baselines` returns `{"items": [...], "limits": {"max_baselines": 10}}`, newest first. Each item has `id`, `project`,
+`name`, `note`, `created_at`, `created_by` (a user reference, `null` when no user is recorded), `tasks` (how many tasks it holds),
+`leaf_tasks`, `milestones`, `estimate_hours` (the scope it recorded) and `finish` (its last finish date, `null` when no task had a date).
+
+`POST /api/projects/{key}/baselines` takes `{"name": "Kickoff", "note": "Agreed with the client"}`, both optional, and returns the new item with `201`.
+It is refused on an archived project (`409 project_archived`), when the name is already used in the project (`409 baseline_name_taken`), when the
+project already has 10 baselines (`409 too_many_baselines`) and when the project has more than 10,000 tasks (`409 baseline_too_large`); a name or
+note with control or direction-override characters, or one that is too long, is a `422`. Nothing is stored when it is refused.
+
+`GET /api/projects/{key}/baselines/{baseline_id}` returns `baseline` (the item above), `project`, `as_of` (today in the organisation's time zone) and:
+
+- `summary`: `tasks` (`planned` and `now` count leaf tasks; `compared`, `on_plan`, `slipped`, `ahead`, `no_dates`, `added`, `dropped`, `split`),
+  `slip` (`max_days` and `average_days` over the tasks that slipped), `overdue` (open tasks past their due date now), `finish` (`baseline`,
+  `now`, `shift_days`: the project's last finish date then and now), `scope_hours` (`baseline`, `now`, `change`) and `milestones` (`planned`,
+  `on_plan`, `slipped`, `ahead`, `dropped`, `added`).
+- `tasks`: the tasks that are in both, worst slip first, then the ones that moved earlier, then the ones on plan, then those without dates (at most
+  5,000; `tasks_truncated` says whether the list was cut). Each has `key`, `number`, `title`, `status`, `assignee`, `state` (`slipped`, `ahead`, `on_plan`,
+  `no_dates`), `slip_days`, `overdue`, `start_shift_days`, `due_shift_days`, `baseline` (`status`, `start_date`, `due_date`, `finish`, `estimate_hours`) and
+  `now` (`start_date`, `due_date`, `finish`, `finished`, `estimate_hours`). A shift is `null` when either side has no date.
+- `added` and `dropped`: tasks that are new since the baseline and tasks that were cancelled or deleted (with a `reason`), at most 200 of each.
+- `milestones`: `items` (each with `state`: `slipped`, `ahead`, `on_plan` or `dropped`, `baseline_due_date`, `due_date` and `slip_days`) and `added`.
+
+The rules:
+
+- Only leaf tasks (tasks without subtasks) are compared. A parent has no work of its own, so a baseline that held a parent and its subtasks is not counted twice.
+- A task's *finish* is the day it was completed when it is done (in the organisation's time zone), otherwise its due date. `slip_days` is the finish
+  now minus the finish in the baseline, in calendar days: positive is late, negative is early. A task that was finished late has slipped even though
+  nobody moved its due date, and a task that was already done when the baseline was set cannot slip.
+- An open task that is past its due date is `overdue` but has not slipped yet: nothing says when it will really finish, and the projection does that.
+- A leaf that has been split into subtasks since is counted in `split`, and its subtasks are `added`. A task that has been cancelled or deleted is `dropped`.
+  A cancelled task comes back as new work if it is reopened.
+- Scope is the sum of the estimates of the leaf tasks; a task without an estimate counts as 0 hours.
+- The tables are created when the server starts; until then every baseline endpoint answers `409 baselines_not_initialised`.
+
+Setting and deleting a baseline are written to the project's activity and can be delivered to webhooks (`baseline.created`, `baseline.deleted`).
+An unknown baseline, or one that belongs to another project, is a `404 baseline_not_found`.
 
 ## Microsoft Project
 

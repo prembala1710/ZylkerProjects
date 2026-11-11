@@ -446,10 +446,11 @@ def report_digest(ctx, req):
 
 # ----------------------------------------------------------------------- feature endpoints
 
-# Each module registers its own endpoints when it is imported: file attachments, the delivery projection and the
-# Microsoft Project export and import.
+# Each module registers its own endpoints when it is imported: file attachments, baselines, the delivery projection and
+# the Microsoft Project export and import.
 from . import (  # noqa: E402
     attachment_routes,  # noqa: F401
+    baseline_routes,  # noqa: F401
     msproject_routes,  # noqa: F401
     projection_routes,  # noqa: F401
 )
