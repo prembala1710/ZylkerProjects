@@ -132,21 +132,21 @@ activity feed as `custom_fields.<field_key>: old -> new`; changes to definitions
 
 ### Task fields
 
-`title` (required, <= 200) \u00b7 `description` (<= 20,000) \u00b7 `type` (`task` `bug` `story` `epic`) \u00b7 `status`
-(`todo` `in_progress` `in_review` `blocked` `done` `cancelled`) \u00b7 `priority` (`low` `medium` `high` `critical`) \u00b7
-`assignee` (username or `null`; must be an active project member) \u00b7 `parent` (task key or `null`) \u00b7 `milestone`
-(id or `null`) \u00b7 `start_date` / `due_date` (`YYYY-MM-DD`, due must not precede start) \u00b7 `estimate_hours` (0-10,000) \u00b7
-`labels` (<= 20 of `[a-z0-9_./-]`, <= 30 chars) \u00b7 `external_ref` (<= 100, e.g. the Jira key it came from).
+`title` (required, <= 200) · `description` (<= 20,000) · `type` (`task` `bug` `story` `epic`) · `status`
+(`todo` `in_progress` `in_review` `blocked` `done` `cancelled`) · `priority` (`low` `medium` `high` `critical`) ·
+`assignee` (username or `null`; must be an active project member) · `parent` (task key or `null`) · `milestone`
+(id or `null`) · `start_date` / `due_date` (`YYYY-MM-DD`, due must not precede start) · `estimate_hours` (0-10,000) ·
+`labels` (<= 20 of `[a-z0-9_./-]`, <= 30 chars) · `external_ref` (<= 100, e.g. the Jira key it came from).
 Unknown fields are rejected, not ignored.
 
 ### `GET /api/tasks` query parameters
 
-`project=A,B` \u00b7 `status=` \u00b7 `priority=` \u00b7 `type=` (comma lists) \u00b7 `open=true` / `closed=true` \u00b7
-`assignee=` / `reporter=` (usernames, `me`, and for assignee `none`) \u00b7 `watcher=` (usernames or `me`; with several, the task must be watched by all of them) \u00b7 `label=` (any of) \u00b7 `milestone=<id>|none` \u00b7
-`parent=<key>|none` \u00b7 `leaf=true` \u00b7 `q=` (title, description or exact key) \u00b7 `due_before=` / `due_after=` \u00b7
-`overdue=true` \u00b7 `external_ref=` \u00b7 `sort=` (`key number title status priority due_date start_date created_at updated_at
-estimate_hours assignee`, comma-separated, `-` prefix for descending; dates sort empty-last) \u00b7 `limit=` (default 50, max
-200) \u00b7 `offset=`. Unknown values are rejected with 422 rather than silently ignored.
+`project=A,B` · `status=` · `priority=` · `type=` (comma lists) · `open=true` / `closed=true` ·
+`assignee=` / `reporter=` (usernames, `me`, and for assignee `none`) · `watcher=` (usernames or `me`; with several, the task must be watched by all of them) · `label=` (any of) · `milestone=<id>|none` ·
+`parent=<key>|none` · `leaf=true` · `q=` (title, description or exact key) · `due_before=` / `due_after=` ·
+`overdue=true` · `external_ref=` · `sort=` (`key number title status priority due_date start_date created_at updated_at
+estimate_hours assignee`, comma-separated, `-` prefix for descending; dates sort empty-last) · `limit=` (default 50, max
+200) · `offset=`. Unknown values are rejected with 422 rather than silently ignored.
 
 ### Dependency types and lag
 
@@ -291,8 +291,8 @@ curl -H "Authorization: Bearer $TOKEN" -o login-error.png http://127.0.0.1:8080/
 
 ### Attachment fields
 
-`id` \u00b7 `task` (key) \u00b7 `filename` \u00b7 `content_type` \u00b7 `size` (bytes) \u00b7 `sha256` (hex, of the content) \u00b7 `preview` \u00b7 `uploaded_by` (`id`, `username`,
-`display_name`) \u00b7 `created_at`. `preview` is `image/png`, `image/jpeg`, `image/gif` or `image/webp` when the first bytes of the file really are
+`id` · `task` (key) · `filename` · `content_type` · `size` (bytes) · `sha256` (hex, of the content) · `preview` · `uploaded_by` (`id`, `username`,
+`display_name`) · `created_at`. `preview` is `image/png`, `image/jpeg`, `image/gif` or `image/webp` when the first bytes of the file really are
 that kind of image, and `null` for everything else: it is what the UI may display, whatever the file claims to be.
 
 ### Rules
@@ -344,10 +344,10 @@ the audit-trail entries, queued in the same database transaction as the change, 
 
 ### Webhook fields
 
-`name` (required, <= 80) \u00b7 `url` (required, <= 2,000; `http` or `https`; no user name or password in it; loopback, private and other
-non-public addresses are refused unless `ZYLKER_WEBHOOK_ALLOW_PRIVATE` is set) \u00b7 `events` (required, a list of `*`, `<group>.*` or
-exact names from the catalogue below) \u00b7 `projects` (project keys; empty or `null` means every project, otherwise only events that
-belong to one of those projects are sent) \u00b7 `active` (default `true`). Unknown fields are rejected: there is deliberately no way to
+`name` (required, <= 80) · `url` (required, <= 2,000; `http` or `https`; no user name or password in it; loopback, private and other
+non-public addresses are refused unless `ZYLKER_WEBHOOK_ALLOW_PRIVATE` is set) · `events` (required, a list of `*`, `<group>.*` or
+exact names from the catalogue below) · `projects` (project keys; empty or `null` means every project, otherwise only events that
+belong to one of those projects are sent) · `active` (default `true`). Unknown fields are rejected: there is deliberately no way to
 choose your own secret. At most 50 webhooks exist.
 
 A webhook response also carries `pending_deliveries` and `health` (`last_delivery_at`, `last_status`, `consecutive_failures`, which
