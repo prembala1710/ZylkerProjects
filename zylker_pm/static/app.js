@@ -931,10 +931,22 @@ function downloadCsv(key) { return downloadFile(`/projects/${key}/export.csv`, `
 function downloadMsProject(key) { return downloadFile(`/projects/${key}/export/msproject`, `${key}-msproject.xml`); }
 
 /* ---------- timeline ---------- */
+const DEP_STATES = ['ok', 'holding', 'conflict'];
+const depSummary = (d) => `${DEP_TYPE_SHORT[d.type]}${d.lag_days ? ' \u00b7 ' + lagText(d.lag_days) : ''}`;
+// The route of one dependency arrow, from the blocker's bar (a) to the blocked task's bar (b); both are {l, r, cy}.
+function depPath(type, a, b, rowH) {
+  const stub = 7;
+  if (type === 'start_to_start') return `M${a.l} ${a.cy} H${Math.min(a.l, b.l) - stub} V${b.cy} H${b.l}`;
+  if (type === 'finish_to_finish') return `M${a.r} ${a.cy} H${Math.max(a.r, b.r) + stub} V${b.cy} H${b.r}`;
+  if (b.l >= a.r + 2 * stub) return `M${a.r} ${a.cy} H${a.r + stub} V${b.cy} H${b.l}`;
+  // The blocked bar starts before the blocker's ends (or too close to turn in): go round, through the gap between rows.
+  const gapY = a.cy + (b.cy > a.cy ? 1 : -1) * rowH / 2;
+  return `M${a.r} ${a.cy} H${a.r + stub} V${gapY} H${b.l - stub} V${b.cy} H${b.l}`;
+}
 async function timelineTab(root, ctx) {
   const { project, key } = ctx;
-  const [tasksResp, ms, cp] = await Promise.all([api('/tasks', { query: { project: key, limit: 200, sort: 'due_date,key', leaf: 'true' } }),
-    api(`/projects/${key}/milestones`), api(`/projects/${key}/critical-path`)]);
+  const [tasksResp, ms, cp, depResp] = await Promise.all([api('/tasks', { query: { project: key, limit: 200, sort: 'due_date,key', leaf: 'true' } }),
+    api(`/projects/${key}/milestones`), api(`/projects/${key}/critical-path`), api(`/projects/${key}/dependencies`).catch(() => null)]);
   if (!ctx.alive()) return;
   const critical = new Set(cp.tasks.filter((t) => t.critical).map((t) => t.key));
   const scheduled = tasksResp.items.filter((t) => (t.start_date || t.due_date) && t.status !== 'cancelled');
@@ -947,7 +959,22 @@ async function timelineTab(root, ctx) {
   const labelW = 270, rowH = 30, headH = 52, msH = 26;
   const x = (d) => labelW + dayDiff(first, d) * px;
   const width = labelW + days * px + 130, height = headH + msH + scheduled.length * rowH + 16;
-  const svg = sv('svg', { class: 'chart', width, height, viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'Project timeline' });
+  const svg = sv('svg', { class: 'chart', width, height, viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'Project timeline' },
+    sv('defs', {}, DEP_STATES.map((st) => sv('marker', { id: `tl-head-${st}`, viewBox: '0 0 8 8', refX: 7, refY: 4, markerWidth: 8, markerHeight: 8, markerUnits: 'userSpaceOnUse', orient: 'auto' },
+      sv('path', { d: 'M0 0 L8 4 L0 8 z', class: `tl-head ${st}` })))));
+  // Dependencies: what each task waits for / holds up (for the tooltips), and which arrows touch which task (for the highlight on hover).
+  const deps = depResp ? depResp.items : [];
+  const open = (status) => status !== 'done' && status !== 'cancelled';
+  const depState = (d) => (d.schedule && d.schedule.conflict && open(d.blocked.status) ? 'conflict' : d.holding ? 'holding' : 'ok');
+  const push = (map, k, v) => { if (!map.has(k)) map.set(k, []); map.get(k).push(v); };
+  const waitsFor = new Map(), holdsUp = new Map(), arrowsOf = new Map(), geo = new Map();
+  for (const d of deps) { push(waitsFor, d.blocked.key, `${d.blocker.key} (${depSummary(d)})`); push(holdsUp, d.blocker.key, `${d.blocked.key} (${depSummary(d)})`); }
+  const emphasise = (taskKey, on) => {
+    const own = arrowsOf.get(taskKey) || [];
+    svg.classList.toggle('dep-focus', on && own.length > 0);
+    for (const arrow of own) arrow.classList.toggle('hl', on);
+  };
+  const depLines = (k) => [waitsFor.has(k) ? `\nWaits for: ${waitsFor.get(k).join(', ')}` : '', holdsUp.has(k) ? `\nHolds up: ${holdsUp.get(k).join(', ')}` : ''].join('');
   // month ticks & week grid
   for (let i = 0; i < days; i++) {
     const d = addDays(first, i), date = parseDate(d);
@@ -964,19 +991,49 @@ async function timelineTab(root, ctx) {
     const y = headH + msH + i * rowH;
     const s = t.start_date || t.due_date, e = t.due_date || t.start_date;
     const bx = x(s), bw = Math.max(px * (dayDiff(s, e) + 1), 8);
+    geo.set(t.key, { l: bx, r: bx + bw, cy: y + rowH / 2 });
     const label = `${t.key}  ${t.title}`;
-    const row = sv('g', { class: 'tl-row', tabindex: 0, role: 'button', 'aria-label': `${t.key} ${t.title}, ${STATUS_LABEL[t.status]}`, onclick: () => openTask(t.key), onkeydown: (ev) => { if (ev.key === 'Enter') openTask(t.key); } },
+    const row = sv('g', { class: 'tl-row', tabindex: 0, role: 'button', 'aria-label': `${t.key} ${t.title}, ${STATUS_LABEL[t.status]}`, onclick: () => openTask(t.key), onkeydown: (ev) => { if (ev.key === 'Enter') openTask(t.key); },
+      onmouseenter: () => emphasise(t.key, true), onmouseleave: () => emphasise(t.key, false), onfocus: () => emphasise(t.key, true), onblur: () => emphasise(t.key, false) },
       sv('rect', { class: 'hit', x: 0, y, width, height: rowH }),
       sv('text', { x: 6, y: y + 19, class: 'tl-label' }, label.length > 40 ? label.slice(0, 39) + '\u2026' : label),
       sv('rect', { class: `tl-bar ${t.status} ${critical.has(t.key) ? 'critical' : ''}`, x: bx, y: y + 6, width: bw, height: rowH - 12, rx: 5 },
-        sv('title', {}, `${t.key} ${t.title}\n${STATUS_LABEL[t.status]} \u00b7 ${t.assignee ? t.assignee.display_name : 'unassigned'}\n${fmtDate(t.start_date)} \u2192 ${fmtDate(t.due_date)}${critical.has(t.key) ? '\nOn the critical path' : ''}`)));
+        sv('title', {}, `${t.key} ${t.title}\n${STATUS_LABEL[t.status]} \u00b7 ${t.assignee ? t.assignee.display_name : 'unassigned'}\n${fmtDate(t.start_date)} \u2192 ${fmtDate(t.due_date)}${critical.has(t.key) ? '\nOn the critical path' : ''}${depLines(t.key)}`)));
     svg.append(row);
   });
+  // The arrows go on top of the rows but never take a click or a hover away from them.
+  const arrows = sv('g', { class: 'tl-deps', 'aria-hidden': 'true' });
+  for (const d of deps) {
+    const a = geo.get(d.blocker.key), b = geo.get(d.blocked.key);
+    if (!a || !b) continue;
+    const st = depState(d);
+    const arrow = sv('path', { class: `tl-dep ${st}`, d: depPath(d.type, a, b, rowH), 'marker-end': `url(#tl-head-${st})`,
+      'data-from': d.blocker.key, 'data-to': d.blocked.key, 'data-type': d.type, 'data-state': st });
+    arrows.append(arrow);
+    push(arrowsOf, d.blocker.key, arrow); push(arrowsOf, d.blocked.key, arrow);
+  }
+  svg.append(arrows);
+  const drawn = arrows.childNodes.length, conflicts = deps.filter((d) => depState(d) === 'conflict');
+  const count = (n) => (n === 1 ? '1 dependency' : `${n} dependencies`);
+  const plannedVerb = (d) => (d.schedule.applies_to === 'start' ? 'start' : 'finish');
+  const conflictList = !conflicts.length ? null : h('div', { class: 'section', id: 'timeline-conflicts' }, h('h3', { text: 'Dates that break a dependency' }),
+    conflicts.map((d) => h('div', { class: 'item' }, h('div', { class: 'grow' },
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); openTask(d.blocked.key); } }, h('strong', { text: d.blocked.key }), ' ', d.blocked.title),
+      ` is planned to ${plannedVerb(d)} on ${fmtDate(plannedVerb(d) === 'start' ? d.blocked.start_date : d.blocked.due_date)}, but `,
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); openTask(d.blocker.key); } }, h('strong', { text: d.blocker.key }), ' ', d.blocker.title),
+      ` (${DEP_TYPE_LABEL[d.type]}${d.lag_days ? ', ' + lagText(d.lag_days) : ''}) allows it no earlier than ${fmtDate(d.schedule.not_before)}.`))));
+  const depNote = depResp === null ? 'The dependencies could not be loaded, so no arrows are drawn.'
+    : !deps.length ? null
+    : `${count(drawn)} drawn${deps.length > drawn ? `; ${count(deps.length - drawn)} not drawn because a task is not on the timeline` : ''}${depResp.truncated ? '; the project has more dependencies than one answer carries' : ''}.`;
   root.append(h('div', { class: 'card' }, h('div', { class: 'row wrap', style: { marginBottom: '10px' } }, h('h2', { text: 'Timeline' }), h('span', { class: 'spacer' }),
+    drawn ? h('label', { class: 'row small' }, h('input', { type: 'checkbox', checked: true, onchange: (e) => svg.classList.toggle('no-deps', !e.target.checked) }), 'Dependency arrows') : null,
     h('span', { class: 'legend' }, h('span', {}, h('span', { class: 'sw s-in_progress' }), 'In progress'), h('span', {}, h('span', { class: 'sw s-done' }), 'Done'), h('span', {}, h('span', { class: 'sw s-todo' }), 'To do'),
-      h('span', {}, h('span', { class: 'sw s-blocked' }), 'Blocked'), h('span', {}, '\u25C6 Milestone'), h('span', {}, 'Red outline = critical path'))),
+      h('span', {}, h('span', { class: 'sw s-blocked' }), 'Blocked'), h('span', {}, '\u25C6 Milestone'), h('span', {}, 'Red outline = critical path'),
+      drawn ? [h('span', {}, h('span', { class: 'sw-line ok' }), 'Dependency'), h('span', {}, h('span', { class: 'sw-line holding' }), 'Holding a task back'), h('span', {}, h('span', { class: 'sw-line conflict' }), 'Dates break it')] : null)),
     h('div', { class: 'timeline-wrap' }, svg),
-    unscheduled.length ? h('p', { class: 'small muted', style: { marginTop: '10px' }, text: `${plural(unscheduled.length, 'task')} without dates are not shown: ${unscheduled.slice(0, 8).map((t) => t.key).join(', ')}${unscheduled.length > 8 ? '\u2026' : ''}` }) : null));
+    depNote ? h('p', { class: 'small muted', id: 'timeline-dep-note', style: { marginTop: '10px' }, text: depNote }) : null,
+    unscheduled.length ? h('p', { class: 'small muted', style: { marginTop: '10px' }, text: `${plural(unscheduled.length, 'task')} without dates are not shown: ${unscheduled.slice(0, 8).map((t) => t.key).join(', ')}${unscheduled.length > 8 ? '\u2026' : ''}` }) : null,
+    conflictList));
 }
 
 /* ---------- milestones ---------- */
