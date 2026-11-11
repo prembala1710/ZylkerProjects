@@ -145,7 +145,7 @@ class SeedTests(CliBase):
         code, out, _ = self.run_cli("seed-demo")
         self.assertEqual(code, 0)
         names = [line.split("'")[1] for line in out.splitlines() if line.startswith("API token for")]
-        self.assertEqual(sorted(names), ["alice", "bob", "carol", "dave", "erin"])
+        self.assertEqual(sorted(names), ["alice", "bob", "carol", "dave", "erin", "milo", "rita"])  # five people and two client contacts
         code, _, err = self.run_cli("seed-demo")
         self.assertEqual(code, 1)
         self.assertIn("already contains projects", err)

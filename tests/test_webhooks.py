@@ -223,7 +223,8 @@ class WebhookApiTests(WebhookCase):
         self.assertEqual((catalog["ping"], catalog["never_delivered"]), ("webhook.ping", ["user.*", "webhook.*"]))
         self.assertEqual(catalog["groups"]["comment"], ["comment.added", "comment.edited", "comment.deleted"])
         for pattern in catalog["patterns"]:  # everything the catalogue advertises can actually be subscribed to
-            self.ok(self.admin.post("/api/webhooks", {"name": pattern, "url": URL, "events": [pattern]}), 201)
+            made = self.ok(self.admin.post("/api/webhooks", {"name": pattern, "url": URL, "events": [pattern]}), 201)
+            self.ok(self.admin.delete("/api/webhooks/%d" % made["id"]), 204)  # (there are more patterns than the server allows webhooks)
 
     def test_the_catalogue_covers_every_audited_action(self):
         """Fails when a feature starts logging an audit action that nobody added to ``webhooks.EVENT_GROUPS``.

@@ -27,16 +27,16 @@ Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric
 | Endpoint | Role | Notes |
 |---|---|---|
 | `GET /api/health` | public | `{"status": "ok", "version": ...}` - for load balancers |
-| `GET /api/meta` | viewer | Enumerations, the workflow transition map, server `today` and timezone, custom-field types and limits, dependency and link types, checklist / watcher / bulk limits |
-| `GET /api/me` | viewer | The authenticated user |
+| `GET /api/meta` | viewer | Enumerations, the workflow transition map, server `today` and timezone, custom-field types and limits, dependency and link types, checklist / watcher / bulk limits, the client sharing levels and limits. One of the few routes a [client contact](#clients-and-the-client-portal) may call |
+| `GET /api/me` | viewer | The authenticated user; for a client contact also `client` (`{id, name}`). The other route a client contact may call |
 
 ## Users
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/users` | viewer | Active users; `?include_inactive=true` (admins only) adds deactivated ones |
+| `GET /api/users` | viewer | Active users; `?include_inactive=true` (admins only) adds deactivated ones. The staff only: [client contacts](#clients-and-the-client-portal) are managed from their client and are not listed |
 | `POST /api/users` | admin | `{username, display_name, email?, role?, weekly_capacity_hours?}` - the response contains the API token, **once** |
-| `PATCH /api/users/{user_id}` | viewer | Admins: any field (`role`, `active`, `weekly_capacity_hours`, ...). Everyone else: only their own `display_name` / `email`. The last active admin cannot be demoted or deactivated |
+| `PATCH /api/users/{user_id}` | viewer | Admins: any field (`role`, `active`, `weekly_capacity_hours`, ...). Everyone else: only their own `display_name` / `email`. The last active admin cannot be demoted or deactivated. A client contact cannot be changed here (`409 client_contact`) |
 | `POST /api/users/{user_id}/rotate-token` | viewer | Admins for anyone, others for themselves. Invalidates the old token immediately |
 | `GET /api/activity` | admin | Global audit trail (user/role changes, token rotations); `?limit=&before=` |
 
@@ -132,21 +132,21 @@ activity feed as `custom_fields.<field_key>: old -> new`; changes to definitions
 
 ### Task fields
 
-`title` (required, <= 200) · `description` (<= 20,000) · `type` (`task` `bug` `story` `epic`) · `status`
-(`todo` `in_progress` `in_review` `blocked` `done` `cancelled`) · `priority` (`low` `medium` `high` `critical`) ·
-`assignee` (username or `null`; must be an active project member) · `parent` (task key or `null`) · `milestone`
-(id or `null`) · `start_date` / `due_date` (`YYYY-MM-DD`, due must not precede start) · `estimate_hours` (0-10,000) ·
-`labels` (<= 20 of `[a-z0-9_./-]`, <= 30 chars) · `external_ref` (<= 100, e.g. the Jira key it came from).
+`title` (required, <= 200) \u00b7 `description` (<= 20,000) \u00b7 `type` (`task` `bug` `story` `epic`) \u00b7 `status`
+(`todo` `in_progress` `in_review` `blocked` `done` `cancelled`) \u00b7 `priority` (`low` `medium` `high` `critical`) \u00b7
+`assignee` (username or `null`; must be an active project member) \u00b7 `parent` (task key or `null`) \u00b7 `milestone`
+(id or `null`) \u00b7 `start_date` / `due_date` (`YYYY-MM-DD`, due must not precede start) \u00b7 `estimate_hours` (0-10,000) \u00b7
+`labels` (<= 20 of `[a-z0-9_./-]`, <= 30 chars) \u00b7 `external_ref` (<= 100, e.g. the Jira key it came from).
 Unknown fields are rejected, not ignored.
 
 ### `GET /api/tasks` query parameters
 
-`project=A,B` · `status=` · `priority=` · `type=` (comma lists) · `open=true` / `closed=true` ·
-`assignee=` / `reporter=` (usernames, `me`, and for assignee `none`) · `watcher=` (usernames or `me`; with several, the task must be watched by all of them) · `label=` (any of) · `milestone=<id>|none` ·
-`parent=<key>|none` · `leaf=true` · `q=` (title, description or exact key) · `due_before=` / `due_after=` ·
-`overdue=true` · `external_ref=` · `sort=` (`key number title status priority due_date start_date created_at updated_at
-estimate_hours assignee`, comma-separated, `-` prefix for descending; dates sort empty-last) · `limit=` (default 50, max
-200) · `offset=`. Unknown values are rejected with 422 rather than silently ignored.
+`project=A,B` \u00b7 `status=` \u00b7 `priority=` \u00b7 `type=` (comma lists) \u00b7 `open=true` / `closed=true` \u00b7
+`assignee=` / `reporter=` (usernames, `me`, and for assignee `none`) \u00b7 `watcher=` (usernames or `me`; with several, the task must be watched by all of them) \u00b7 `label=` (any of) \u00b7 `milestone=<id>|none` \u00b7
+`parent=<key>|none` \u00b7 `leaf=true` \u00b7 `q=` (title, description or exact key) \u00b7 `due_before=` / `due_after=` \u00b7
+`overdue=true` \u00b7 `external_ref=` \u00b7 `sort=` (`key number title status priority due_date start_date created_at updated_at
+estimate_hours assignee`, comma-separated, `-` prefix for descending; dates sort empty-last) \u00b7 `limit=` (default 50, max
+200) \u00b7 `offset=`. Unknown values are rejected with 422 rather than silently ignored.
 
 ### Dependency types and lag
 
@@ -291,8 +291,8 @@ curl -H "Authorization: Bearer $TOKEN" -o login-error.png http://127.0.0.1:8080/
 
 ### Attachment fields
 
-`id` · `task` (key) · `filename` · `content_type` · `size` (bytes) · `sha256` (hex, of the content) · `preview` · `uploaded_by` (`id`, `username`,
-`display_name`) · `created_at`. `preview` is `image/png`, `image/jpeg`, `image/gif` or `image/webp` when the first bytes of the file really are
+`id` \u00b7 `task` (key) \u00b7 `filename` \u00b7 `content_type` \u00b7 `size` (bytes) \u00b7 `sha256` (hex, of the content) \u00b7 `preview` \u00b7 `uploaded_by` (`id`, `username`,
+`display_name`) \u00b7 `created_at`. `preview` is `image/png`, `image/jpeg`, `image/gif` or `image/webp` when the first bytes of the file really are
 that kind of image, and `null` for everything else: it is what the UI may display, whatever the file claims to be.
 
 ### Rules
@@ -344,10 +344,10 @@ the audit-trail entries, queued in the same database transaction as the change, 
 
 ### Webhook fields
 
-`name` (required, <= 80) · `url` (required, <= 2,000; `http` or `https`; no user name or password in it; loopback, private and other
-non-public addresses are refused unless `ZYLKER_WEBHOOK_ALLOW_PRIVATE` is set) · `events` (required, a list of `*`, `<group>.*` or
-exact names from the catalogue below) · `projects` (project keys; empty or `null` means every project, otherwise only events that
-belong to one of those projects are sent) · `active` (default `true`). Unknown fields are rejected: there is deliberately no way to
+`name` (required, <= 80) \u00b7 `url` (required, <= 2,000; `http` or `https`; no user name or password in it; loopback, private and other
+non-public addresses are refused unless `ZYLKER_WEBHOOK_ALLOW_PRIVATE` is set) \u00b7 `events` (required, a list of `*`, `<group>.*` or
+exact names from the catalogue below) \u00b7 `projects` (project keys; empty or `null` means every project, otherwise only events that
+belong to one of those projects are sent) \u00b7 `active` (default `true`). Unknown fields are rejected: there is deliberately no way to
 choose your own secret. At most 50 webhooks exist.
 
 A webhook response also carries `pending_deliveries` and `health` (`last_delivery_at`, `last_status`, `consecutive_failures`, which
@@ -367,10 +367,11 @@ counts failed *attempts* in a row and resets on the next success).
 | `attachment` | `attachment.added` `attachment.deleted` |
 | `time` | `time.logged` `time.deleted` |
 | `baseline` | `baseline.created` `baseline.deleted` |
+| `client` | `client.created` `client.updated` `client.deleted` `client.project_linked` `client.project_updated` `client.project_unlinked` (the project ones are also in the project's activity) |
 | `import` | `import.completed` (one event per CSV or Microsoft Project import, not one per row; `details` has `created`, `skipped_duplicates` and `errors`, and `"source": "msproject"` for Microsoft Project) |
 
 A status change is `task.status_changed`; `task.updated` is every other change. `<group>.*` also covers actions that later versions
-add to the group, and `*` covers everything. `user.*` (user administration) and `webhook.*` (webhook management) are never
+add to the group, and `*` covers everything. `user.*` (user administration, including the creation and changes of client contacts) and `webhook.*` (webhook management) are never
 delivered. `webhook.ping` is sent only by the test endpoint and cannot be subscribed to.
 
 ### Delivery format
@@ -552,6 +553,62 @@ The rules:
 
 Setting and deleting a baseline are written to the project's activity and can be delivered to webhooks (`baseline.created`, `baseline.deleted`).
 An unknown baseline, or one that belongs to another project, is a `404 baseline_not_found`.
+
+## Clients and the client portal
+
+A managed-service provider works for *clients*. A client groups projects (a project belongs to at most one client) and has *contacts*:
+people on the client's side who sign in with a token of their own and see **only the projects that have been shared with their client**.
+Nothing is shared until a manager chooses what the client sees of a project:
+
+| Level | What the client sees |
+|---|---|
+| `none` (the default) | Nothing: the project is not in the portal |
+| `summary` | The project's rating and the sentence behind it, its progress in numbers, the milestones and the manager's latest message to the client. No task is named |
+| `full` | The summary, and the forecast (when the project will be done), what was completed, what is coming up, what needs attention and what changed in the last few days, task by task |
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/clients` | viewer | Every client with a roll-up of its projects (`projects`: `total`, `shared`, `open_tasks`, `overdue_tasks`), `contacts`, the worst `health` and the worst `forecast` (`verdict`, `late_by_days`, `late_tasks`, `finish`) of its projects that are not archived; the ones that need attention first, suspended ones last. Staff only |
+| `POST /api/clients` | manager | `{name}`: 1-80 characters, unique (case-insensitive), no control or direction characters (`201`). At most 500 clients |
+| `GET /api/clients/{client_id}` | viewer | The client, its `projects` (each with `share`, `update`, `health`, `progress_pct`, `forecast`), its `contacts` and the `available_projects` that belong to no client |
+| `PATCH /api/clients/{client_id}` | manager | `{name?, active?}`. `active: false` suspends the client: its contacts are refused at once (`403 client_suspended`) until it is reactivated |
+| `DELETE /api/clients/{client_id}` | admin | `204`. Refused while the client has contacts (`409 client_has_contacts`; suspend it instead). Its project links go with it, the projects stay |
+| `PUT /api/clients/{client_id}/projects/{key}` | manager | Links the project to the client, or changes how it is shared: `{share?, update?}`. `share` is `none`, `summary` or `full` (default `none` for a new link). `update` is the manager's message to the client (up to 1,000 characters; `null` or an empty string takes it down); the portal shows it with the manager's name and the date. `409 project_assigned_elsewhere` when another client has the project |
+| `DELETE /api/clients/{client_id}/projects/{key}` | manager | Takes the project out of the client's portal at once (`204`); `404 project_not_linked` when it was not linked to this client |
+| `POST /api/clients/{client_id}/contacts` | admin | `{username, display_name, email?}`: a new viewer with no capacity, tied to the client for good. The response is `{contact, token}`; the token is shown **once** (`201`) |
+| `PATCH /api/clients/{client_id}/contacts/{user_id}` | admin | `{display_name?, email?, active?}`. A deactivated contact is signed out at once |
+| `POST /api/clients/{client_id}/contacts/{user_id}/rotate-token` | admin | `{contact, token}`: a new token; the old one stops working at once |
+| `GET /api/portal/projects` | viewer | The portal: the client's projects that are shared and not archived, one line each (`rating`, `progress`, `update`, `next_milestone`). A contact gets its own client's; staff name a client to preview with `?client=ID` |
+| `GET /api/portal/projects/{key}` | viewer | One project's status, at the level it is shared at: `?days=1..90` (default 7) is the period "this week" means. A contact gets its own client's projects; staff preview with `?client=ID` |
+
+**A client contact can call nothing else.** The server marks the routes a contact may use (`GET /api/me`, `GET /api/meta` and the two portal
+routes above) and refuses every other route with `403 client_access_denied`, whatever the contact's role and whatever it asks for; a route that says
+nothing about clients is closed to them. A suspended client's contacts get `403 client_suspended` on every route, including these. A contact cannot ask for
+another client's portal (`?client=` with another id is `403`), and another client's project, a project that is not shared, an archived project and a
+project that does not exist are the same `404 project_not_found`, word for word. Staff can preview any client's portal with `?client=ID`; the preview is the
+same answer the client gets, never more.
+
+A contact is a user that is tied to its client for good: there is no way to remove the tie, so no sequence of calls can turn a contact into staff. A contact cannot be
+a project owner, member or assignee (`422`), is not matched by an import, does not appear in `GET /api/users`, and cannot be edited through `PATCH /api/users/{user_id}` (`409 client_contact`).
+A contact who is no longer wanted is deactivated.
+
+`GET /api/portal/projects/{key}` returns, for both levels: `client`, `project` (`key`, `name`, `status`, `owner` as a name, `start_date`, `due_date`), `level`, `as_of`
+(today in the organisation's time zone), `period` (`from`, `to`, `days`), `rating` (`status` and `reasons`, the project's health), `headline` (the sentence that says
+how the project stands), `update` (`text`, `by` as a name, `at`; `null` when there is none), `progress` (`tasks`: `total`, `done`, `open`, `percent`; `period`: `completed` and `added` in the period) and
+`milestones` (`items` that are not achieved, at most 8, each with `name`, `due_date`, `status`, `tasks_done`, `tasks_total`, `progress`; `more`; `achieved`). At the `full` level there are also:
+
+- `forecast`: `state` (`projected`, `complete`, `not_projected` or `unavailable` when there is too much open work to project), `headline`, `finish`, `due_date`, `late_by_days`, `verdict` and `late`
+  (the tasks that will finish after their own dates: `count`, at most 5 `items` with `key`, `title`, `due_date`, `projected_finish`, `late_by_days`, `more`). The milestones carry `projected_finish` and `late_by_days`. It is the
+  [delivery projection](#delivery-projection) without the reasons it gives, which name colleagues and other clients' work;
+- `completed`, `upcoming` (open tasks due in the next 14 days) and `attention` (`overdue` and `blocked`), each `{count, items, more}` with at most 10 items;
+- `changes`: `added` and `cancelled` in the period, and `rescheduled` (open tasks whose due date moved in the period, from where it was when the period began to where it is now: `later`, `earlier`, `count`, `items` with `from`, `to`, `days`).
+
+Only tasks without subtasks are counted, like everywhere else. Who works on a task, hours and estimates, budgets and other custom project fields, comments, descriptions, baselines, workload and every other project
+are not in the answer at all: the portal does not go through the general task, project or report endpoints, so nothing added to those can leak into it.
+
+Setting up and changing a client is written to the audit trail: `client.created`, `client.updated`, `client.deleted` (global activity) and `client.project_linked`, `client.project_updated`, `client.project_unlinked`
+(also in the project's activity); creating and changing contacts is `user.client_contact_added` and `user.client_contact_updated`, which, like all user administration, are never delivered to webhooks.
+The tables are created when the server starts; until then the client endpoints answer `409 clients_not_initialised`.
 
 ## Microsoft Project
 

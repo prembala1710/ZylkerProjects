@@ -36,7 +36,7 @@ class DocsTests(unittest.TestCase):
     def test_no_stale_routes_are_documented(self):
         App(Config(db_path=":memory:"))
         real = {f"{r.method} {r.pattern}" for r in ROUTES}
-        documented = set(re.findall(r"`((?:GET|POST|PATCH|DELETE) /api/[^`\s]+)`", read("docs", "API.md")))
+        documented = set(re.findall(r"`((?:GET|POST|PUT|PATCH|DELETE) /api/[^`\s]+)`", read("docs", "API.md")))
         self.assertEqual(sorted(documented - real), [], "documented endpoints that do not exist")
 
     def test_every_environment_variable_is_documented(self):
