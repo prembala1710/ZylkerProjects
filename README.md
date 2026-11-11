@@ -20,7 +20,7 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **Bulk actions** - tick tasks in the List view and change their status, assignee, priority, labels, milestone or due date in one go;
   anything the server refuses is listed with the reason (see [Bulk actions](#bulk-actions)).
 - **Boards, lists and a timeline** - drag-and-drop Kanban board, sortable/filterable list, and a Gantt-style timeline with
-  milestones and the critical path highlighted.
+  milestones, the critical path highlighted and an arrow for every dependency (see [Dependencies](#dependencies)).
 - **Health you can trust** - every project gets an on-track / at-risk / off-track status with the *reasons* spelled out
   (see [How health is decided](#how-health-is-decided)); a portfolio dashboard sorts the worst first.
 - **Delivery projection** - health tells you how a project looks today; the projection plays the open work forward, using
@@ -140,6 +140,13 @@ A dependency makes one task (the *blocked* one) wait for another (the *blocker*)
 *Lag* (days, positive) and *lead* (negative) say when the dates *should* fall, for example "start 2 days after the blocker finishes". They never move a task and never block a
 status change; the task dialog flags a link with a warning when the planned dates already break it. Cancelled and done blockers never hold anybody up. Existing dependencies
 become plain finish-to-start links with no lag. The critical path (effort hours, not dates) follows finish-to-start links only.
+
+**On the timeline** every dependency between two tasks on the chart is an arrow from the blocker's bar to the blocked task's bar: finish -> start leaves the end of the blocker and
+enters the start of the blocked task, start -> start joins the two starts, finish -> finish the two ends. A grey arrow holds nothing back right now; an orange one is holding the blocked
+task back (the blocker is not finished, or for start -> start not started); a red dashed one means the blocked task is still open and its planned dates break the link - the same
+warning the task dialog gives - and is also listed under the chart in words, with a link to each task. Hovering over a row, or tabbing to it, picks out its arrows and the tooltip of
+its bar names what it waits for and what it holds up; the *Dependency arrows* box switches the arrows off. Links to a task that is not on the chart (no dates, cancelled, or a parent
+task) are counted under the chart but not drawn. `GET /api/projects/{key}/dependencies` returns the same links to anyone who wants to draw them differently.
 
 ## Bulk actions
 
@@ -485,6 +492,6 @@ Dependencies are within one project, and lag/lead only flags dates - it never re
 informational and cannot be listed or filtered across the whole organisation yet; checklist items have no assignee or date and are not in the CSV export; watchers are named in the shared Cliq channel
 rather than messaged privately, and nobody is made a watcher automatically; bulk actions work from the List tab (not the board) and cover status, assignee, priority, labels, milestone and due date only;
 there are no custom fields on tasks (only on projects), recurring tasks or task templates; custom project fields cannot be reordered or filtered on yet; the burndown does not remember reopened
-tasks; the timeline draws no dependency arrows; SSO and per-project read permissions would be the natural next steps for a larger organisation.
+tasks; the timeline's dependency arrows cannot be clicked and join only tasks that are on the chart, so a link to a parent task is counted but not drawn; SSO and per-project read permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*

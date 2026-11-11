@@ -223,6 +223,12 @@ svg.chart { width: 100%; height: auto; display: block; } svg.chart text { fill: 
 .tl-bar.blocked { fill: var(--bad); } .tl-bar.in_review { fill: var(--violet); } .tl-bar.todo { fill: #98a2b3; }
 .tl-ms { fill: var(--warn); } .tl-row:hover rect.hit { fill: var(--surface-2); } rect.hit { fill: transparent; cursor: pointer; }
 .tl-label { fill: var(--text) !important; font-size: 12px !important; }
+.tl-dep { fill: none; stroke: var(--muted); stroke-width: 1.4; stroke-linejoin: round; opacity: .8; pointer-events: none; }
+.tl-dep.holding { stroke: var(--warn); stroke-width: 1.8; opacity: 1; } .tl-dep.conflict { stroke: var(--bad); stroke-width: 1.8; stroke-dasharray: 5 3; opacity: 1; }
+.tl-head { stroke: none; } .tl-head.ok { fill: var(--muted); } .tl-head.holding { fill: var(--warn); } .tl-head.conflict { fill: var(--bad); }
+.chart.dep-focus .tl-dep { opacity: .12; } .chart.dep-focus .tl-dep.hl { opacity: 1; stroke-width: 2.6; } .chart.no-deps .tl-deps { display: none; }
+.legend span.sw-line { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--muted); margin-right: 5px; vertical-align: 3px; }
+.legend span.sw-line.holding { border-top-color: var(--warn); } .legend span.sw-line.conflict { border-top: 2px dashed var(--bad); }
 .util-cell { min-width: 140px; }
 
 /* custom project fields */
