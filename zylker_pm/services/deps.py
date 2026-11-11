@@ -2,14 +2,59 @@
 
 from __future__ import annotations
 
-from ..domain import DEFAULT_DEPENDENCY_TYPE, DEPENDENCY_TYPES, MAX_LAG_DAYS
+from ..domain import DEFAULT_DEPENDENCY_TYPE, DEPENDENCY_TYPES, MAX_LAG_DAYS, OPEN_SQL, UNMET_DEPENDENCY_SQL
 from ..errors import Conflict, NotFound, ValidationError
 from ..util import Checker
 from . import activity, graph, projects, taskrefs, tasks
 
+# One response never carries more than this many links; a project that has more is told so (``truncated``).
+MAX_LISTED_DEPENDENCIES = 5000
+
 
 def _details(row_type, lag_days):
     return {"type": row_type, "lag_days": lag_days}
+
+
+def list_for_project(ctx, key):
+    """Every dependency inside one project, so a chart can draw all of them from a single request.
+
+    ``holding`` uses the rule behind ``blocked_by_open`` (the blocker has not finished, or for start-to-start has not
+    started) and is only true while the blocked task is itself still open. ``schedule`` is the same hint the task
+    dialog shows (``None`` when the blocker lacks the date the link hangs on).
+    """
+    project = projects.get_row(ctx.conn, key)
+    rows = ctx.conn.execute(
+        "SELECT d.type, d.lag_days, "
+        "b.number AS b_number, b.title AS b_title, b.status AS b_status, b.start_date AS b_start, b.due_date AS b_due, "
+        "t.number AS t_number, t.title AS t_title, t.status AS t_status, t.start_date AS t_start, t.due_date AS t_due, "
+        "(" + UNMET_DEPENDENCY_SQL + " AND t.status IN " + OPEN_SQL + ") AS holding "
+        "FROM task_dependencies d JOIN tasks b ON b.id = d.blocker_id JOIN tasks t ON t.id = d.blocked_id "
+        "WHERE b.project_id = ?1 AND t.project_id = ?1 ORDER BY b.number, t.number LIMIT ?2",
+        (project["id"], MAX_LISTED_DEPENDENCIES + 1),
+    ).fetchall()
+    prefix = project["key"] + "-"
+
+    def end(r, side):
+        return {
+            "key": prefix + str(r[side + "_number"]),
+            "title": r[side + "_title"],
+            "status": r[side + "_status"],
+            "start_date": r[side + "_start"],
+            "due_date": r[side + "_due"],
+        }
+
+    items = [
+        {
+            "blocker": end(r, "b"),
+            "blocked": end(r, "t"),
+            "type": r["type"],
+            "lag_days": r["lag_days"],
+            "holding": bool(r["holding"]),
+            "schedule": graph.schedule_hint(r["type"], r["lag_days"], r["b_start"], r["b_due"], r["t_start"], r["t_due"]),
+        }
+        for r in rows[:MAX_LISTED_DEPENDENCIES]
+    ]
+    return {"project": project["key"], "items": items, "truncated": len(rows) > MAX_LISTED_DEPENDENCIES}
 
 
 def add_dependency(ctx, key, data):

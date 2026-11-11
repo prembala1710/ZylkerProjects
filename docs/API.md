@@ -54,6 +54,7 @@ Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric
 | `GET /api/projects/{key}/summary` | viewer | Counts, progress, hours, **health** (with the reasons), next milestone |
 | `GET /api/projects/{key}/board` | viewer | Tasks grouped by status column; `?closed_days=14` hides older closed tasks (0 = all) |
 | `GET /api/projects/{key}/critical-path` | viewer | CPM over open, dependency-linked tasks: path, total effort, slack per task |
+| `GET /api/projects/{key}/dependencies` | viewer | Every dependency inside the project in one answer: both tasks, type, lag, whether it is holding the blocked task back, and the date hint - see [Listing a project's dependencies](#listing-a-projects-dependencies). This is what the timeline draws its arrows from |
 | `GET /api/projects/{key}/burndown` | viewer | `?metric=tasks\|hours` `?from=` `?to=` (YYYY-MM-DD, max 367 days). Daily remaining / scope / completed / ideal |
 | `GET /api/projects/{key}/activity` | viewer | `?limit=` (max 200) `?before=<activity id>`; `next_before` pages backwards |
 | `GET /api/projects/{key}/milestones` | viewer | With progress and `achieved` / `overdue` / `open` status |
@@ -171,6 +172,36 @@ blocked task's planned date is earlier. The critical path only follows `finish_t
 Deadlock detection understands all three types: it treats every task as a *start* and a *finish* event, so "B starts after A starts" together with "A finishes
 after B finishes" is accepted, while loops such as "A finishes before B starts, B starts before A starts" are refused with the loop in `details.cycle`.
 Subtasks still have to finish before their parent.
+
+### Listing a project's dependencies
+
+`GET /api/projects/{key}/dependencies` (viewer) returns every dependency of one project, ordered by blocker number and then blocked number. It is read-only and writes nothing to the audit trail.
+
+```json
+{
+  "project": "WEB",
+  "truncated": false,
+  "items": [
+    {
+      "blocker": {"key": "WEB-1", "title": "Design", "status": "in_progress", "start_date": "2026-10-05", "due_date": "2026-10-20"},
+      "blocked": {"key": "WEB-2", "title": "Build", "status": "todo", "start_date": "2026-10-12", "due_date": "2026-10-30"},
+      "type": "finish_to_start",
+      "lag_days": 0,
+      "holding": true,
+      "schedule": {"applies_to": "start", "not_before": "2026-10-20", "conflict": true}
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `blocker`, `blocked` | The two tasks: `key`, `title`, `status`, `start_date`, `due_date` (dates are `null` when not set) |
+| `type`, `lag_days` | As in [Dependency types and lag](#dependency-types-and-lag) |
+| `holding` | True while this link holds the blocked task back right now: the blocked task is still open and the blocker has not reached what the type waits for (not finished for `finish_to_start` and `finish_to_finish`, not started for `start_to_start`). It is the rule behind `blocked_by_open`, so for an open task the number of `holding` links pointing at it equals its `blocked_by_open` |
+| `schedule` | The same hint `blocked_by` / `blocks` carry on a task: `null` when the blocker lacks the date the link hangs on, otherwise `applies_to`, `not_before` and `conflict` |
+
+`truncated` is true when the project has more than 5,000 dependencies; the first 5,000 are returned. An unknown project is a `404 project_not_found`.
 
 ### Task links
 
