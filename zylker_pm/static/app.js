@@ -56,7 +56,7 @@ const DEP_TYPE_HELP = {
 const LINK_LABEL = { relates_to: 'relates to', duplicates: 'duplicates', duplicated_by: 'is duplicated by', cloned_from: 'is cloned from', cloned_to: 'was cloned to' };
 const lagText = (n) => (!n ? '' : n > 0 ? `${n}d lag` : `${-n}d lead`);
 
-const state = { token: null, me: null, meta: null, users: [], projects: [], fields: [], today: '', pendingTask: null, projectCache: {} };
+const state = { token: null, me: null, meta: null, users: [], projects: [], fields: [], today: '', pendingTask: null, projectCache: {}, baselineChoice: {} };
 
 const parseDate = (s) => { if (!s) return null; const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const dayDiff = (a, b) => Math.round((parseDate(b) - parseDate(a)) / 86400000);
@@ -475,7 +475,7 @@ function workloadCard(workload) {
 }
 
 /* ============================== webhooks (admin) ============================== */
-const WEBHOOK_GROUP_LABEL = { project: 'Projects', milestone: 'Milestones', task: 'Tasks', checklist: 'Checklists', watcher: 'Watchers', project_field: 'Project fields', comment: 'Comments', attachment: 'Attachments', time: 'Time tracking', import: 'Imports' };
+const WEBHOOK_GROUP_LABEL = { project: 'Projects', milestone: 'Milestones', task: 'Tasks', checklist: 'Checklists', watcher: 'Watchers', project_field: 'Project fields', comment: 'Comments', attachment: 'Attachments', time: 'Time tracking', baseline: 'Baselines', import: 'Imports' };
 const DELIVERY_BADGE = { succeeded: ['done', 'Delivered'], failed: ['blocked', 'Failed'], pending: ['todo', 'Queued'], sending: ['in_progress', 'Sending'] };
 const DELIVERY_ERROR = { timeout: 'timed out', connection_failed: 'could not connect', dns_error: 'host name did not resolve', tls_error: 'TLS certificate problem',
   blocked_address: 'address is private (blocked)', protocol_error: 'invalid HTTP response', invalid_request: 'invalid request', internal_error: 'internal error',
@@ -930,6 +930,35 @@ async function downloadFile(path, filename) {
 function downloadCsv(key) { return downloadFile(`/projects/${key}/export.csv`, `${key}-tasks.csv`); }
 function downloadMsProject(key) { return downloadFile(`/projects/${key}/export/msproject`, `${key}-msproject.xml`); }
 
+/* ---------- baselines ---------- */
+// A project's baselines and how it compares with one of them. The choice is remembered per project while the page is open: undefined
+// is the newest baseline, '' is none (only the timeline can show none; the Reports tab always compares with one) and anything else is an id.
+async function baselineView(key, { allowNone } = {}) {
+  const list = await api(`/projects/${key}/baselines`);
+  const choice = state.baselineChoice[key];
+  const chosen = choice === '' && allowNone ? null : list.items.find((b) => String(b.id) === choice) || list.items[0] || null;
+  const data = chosen ? await api(`/projects/${key}/baselines/${chosen.id}`) : null;
+  return { list, chosen, data };
+}
+const slipText = (days) => (days > 0 ? `+${days}d` : `\u2212${-days}d`);
+const slipWords = (days) => `${plural(Math.abs(days), 'day')} ${days > 0 ? 'later' : 'earlier'}`;
+const joinList = (items) => (items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`);
+function baselineFinishSentence(summary) {
+  const f = summary.finish;
+  if (!f.baseline || !f.now || f.shift_days === null) return 'No finish date can be compared: the baseline or the project has no dated tasks.';
+  if (f.shift_days === 0) return `The project still finishes ${fmtDate(f.now)}, as in the baseline.`;
+  return `The project now finishes ${fmtDate(f.now)}, ${plural(Math.abs(f.shift_days), 'day')} ${f.shift_days > 0 ? 'after' : 'before'} the ${fmtDate(f.baseline)} in the baseline.`;
+}
+function baselineTaskSentence(summary) {
+  const t = summary.tasks, one = (n, a, b) => (n === 1 ? a : b);
+  const kept = [t.slipped && `${t.slipped} slipped`, t.ahead && `${t.ahead} moved earlier`, t.on_plan && `${t.on_plan} ${one(t.on_plan, 'is', 'are')} on plan`, t.no_dates && `${t.no_dates} ${one(t.no_dates, 'has', 'have')} no dates`].filter(Boolean);
+  const changed = [t.added && `${plural(t.added, 'task')} ${one(t.added, 'was', 'were')} added`, t.dropped && `${plural(t.dropped, 'task')} ${one(t.dropped, 'was', 'were')} dropped`, t.split && `${plural(t.split, 'task')} ${one(t.split, 'was', 'were')} split into subtasks`].filter(Boolean);
+  const hours = summary.scope_hours;
+  return [kept.length ? `Of ${plural(t.planned, 'task')} in the baseline, ${joinList(kept)}.` : t.planned ? null : 'The baseline had no tasks.',
+    changed.length ? `Since then ${joinList(changed)}.` : null,
+    hours.change ? `The estimated scope went from ${fmtHours(hours.baseline)} to ${fmtHours(hours.now)}.` : null].filter(Boolean).join(' ');
+}
+
 /* ---------- timeline ---------- */
 const DEP_STATES = ['ok', 'holding', 'conflict'];
 const depSummary = (d) => `${DEP_TYPE_SHORT[d.type]}${d.lag_days ? ' \u00b7 ' + lagText(d.lag_days) : ''}`;
@@ -945,13 +974,20 @@ function depPath(type, a, b, rowH) {
 }
 async function timelineTab(root, ctx) {
   const { project, key } = ctx;
-  const [tasksResp, ms, cp, depResp] = await Promise.all([api('/tasks', { query: { project: key, limit: 200, sort: 'due_date,key', leaf: 'true' } }),
-    api(`/projects/${key}/milestones`), api(`/projects/${key}/critical-path`), api(`/projects/${key}/dependencies`).catch(() => null)]);
+  const [tasksResp, ms, cp, depResp, bl] = await Promise.all([api('/tasks', { query: { project: key, limit: 200, sort: 'due_date,key', leaf: 'true' } }),
+    api(`/projects/${key}/milestones`), api(`/projects/${key}/critical-path`), api(`/projects/${key}/dependencies`).catch(() => null),
+    baselineView(key, { allowNone: true }).catch(() => null)]); // the timeline still draws if the baselines cannot be loaded
   if (!ctx.alive()) return;
   const critical = new Set(cp.tasks.filter((t) => t.critical).map((t) => t.key));
+  // The baseline being compared with (null for none): what each task and milestone was planned as, to draw under and beside the live ones.
+  const compare = bl && bl.data ? bl.data : null;
+  const planOf = new Map(compare ? compare.tasks.map((r) => [r.key, r]) : []);
+  const msPlanOf = new Map(compare ? compare.milestones.items.filter((m) => m.state !== 'dropped').map((m) => [m.id, m]) : []);
   const scheduled = tasksResp.items.filter((t) => (t.start_date || t.due_date) && t.status !== 'cancelled');
   const unscheduled = tasksResp.items.filter((t) => !t.start_date && !t.due_date && t.status !== 'cancelled');
-  const dates = [state.today, project.start_date, project.due_date, ...ms.items.map((m) => m.due_date), ...scheduled.flatMap((t) => [t.start_date, t.due_date])].filter(Boolean).sort();
+  const dates = [state.today, project.start_date, project.due_date, ...ms.items.map((m) => m.due_date), ...scheduled.flatMap((t) => [t.start_date, t.due_date]),
+    ...scheduled.flatMap((t) => (planOf.has(t.key) ? [planOf.get(t.key).baseline.start_date, planOf.get(t.key).baseline.due_date] : [])),
+    ...ms.items.flatMap((m) => (msPlanOf.has(m.id) ? [msPlanOf.get(m.id).baseline_due_date] : []))].filter(Boolean).sort();
   if (!scheduled.length && !ms.items.length) { root.append(h('div', { class: 'card empty', text: 'Give tasks start and due dates to see them on the timeline.' })); return; }
   const first = addDays(dates[0], -3), last = addDays(dates[dates.length - 1], 3);
   const days = dayDiff(first, last) + 1;
@@ -983,9 +1019,11 @@ async function timelineTab(root, ctx) {
   }
   svg.append(sv('line', { x1: x(state.today), x2: x(state.today), y1: 2, y2: height, class: 'chart today' }), sv('text', { x: x(state.today) + 4, y: 32, fill: 'currentColor' }, 'Today'));
   ms.items.forEach((m) => {
-    const cx = x(m.due_date);
-    svg.append(sv('path', { d: `M${cx} ${headH + 4} l8 8 l-8 8 l-8 -8 z`, class: 'tl-ms' }, sv('title', {}, `${m.name} \u2014 ${fmtDate(m.due_date)} (${m.status}, ${Math.round(m.progress)}%)`)),
-      sv('text', { x: cx + 12, y: headH + 17 }, m.name));
+    const cx = x(m.due_date), was = msPlanOf.get(m.id), moved = was && was.slip_days ? was.slip_days : 0;
+    if (moved) { const gx = x(was.baseline_due_date); svg.append(sv('path', { d: `M${gx} ${headH + 4} l8 8 l-8 8 l-8 -8 z`, class: 'tl-ms-ghost' })); }
+    svg.append(sv('path', { d: `M${cx} ${headH + 4} l8 8 l-8 8 l-8 -8 z`, class: 'tl-ms' },
+      sv('title', {}, `${m.name} \u2014 ${fmtDate(m.due_date)} (${m.status}, ${Math.round(m.progress)}%)${was ? `\nBaseline: ${fmtDate(was.baseline_due_date)}${moved ? ` (${slipWords(moved)})` : ''}` : ''}`)),
+      sv('text', { x: cx + 12, y: headH + 17 }, m.name, moved ? sv('tspan', { class: `tl-slip ${moved > 0 ? 'late' : 'ahead'}`, dx: 6 }, slipText(moved)) : null));
   });
   scheduled.forEach((t, i) => {
     const y = headH + msH + i * rowH;
@@ -993,12 +1031,16 @@ async function timelineTab(root, ctx) {
     const bx = x(s), bw = Math.max(px * (dayDiff(s, e) + 1), 8);
     geo.set(t.key, { l: bx, r: bx + bw, cy: y + rowH / 2 });
     const label = `${t.key}  ${t.title}`;
-    const row = sv('g', { class: 'tl-row', tabindex: 0, role: 'button', 'aria-label': `${t.key} ${t.title}, ${STATUS_LABEL[t.status]}`, onclick: () => openTask(t.key), onkeydown: (ev) => { if (ev.key === 'Enter') openTask(t.key); },
+    const was = planOf.get(t.key), slip = was && was.slip_days ? was.slip_days : 0;
+    const gs = was && (was.baseline.start_date || was.baseline.due_date), ge = was && (was.baseline.due_date || was.baseline.start_date);
+    const row = sv('g', { class: 'tl-row', tabindex: 0, role: 'button', 'aria-label': `${t.key} ${t.title}, ${STATUS_LABEL[t.status]}${slip ? `, ${slipWords(slip)} than the baseline` : ''}`, onclick: () => openTask(t.key), onkeydown: (ev) => { if (ev.key === 'Enter') openTask(t.key); },
       onmouseenter: () => emphasise(t.key, true), onmouseleave: () => emphasise(t.key, false), onfocus: () => emphasise(t.key, true), onblur: () => emphasise(t.key, false) },
       sv('rect', { class: 'hit', x: 0, y, width, height: rowH }),
       sv('text', { x: 6, y: y + 19, class: 'tl-label' }, label.length > 40 ? label.slice(0, 39) + '\u2026' : label),
       sv('rect', { class: `tl-bar ${t.status} ${critical.has(t.key) ? 'critical' : ''}`, x: bx, y: y + 6, width: bw, height: rowH - 12, rx: 5 },
-        sv('title', {}, `${t.key} ${t.title}\n${STATUS_LABEL[t.status]} \u00b7 ${t.assignee ? t.assignee.display_name : 'unassigned'}\n${fmtDate(t.start_date)} \u2192 ${fmtDate(t.due_date)}${critical.has(t.key) ? '\nOn the critical path' : ''}${depLines(t.key)}`)));
+        sv('title', {}, `${t.key} ${t.title}\n${STATUS_LABEL[t.status]} \u00b7 ${t.assignee ? t.assignee.display_name : 'unassigned'}\n${fmtDate(t.start_date)} \u2192 ${fmtDate(t.due_date)}${was ? `\nBaseline: ${gs ? `${fmtDate(was.baseline.start_date)} \u2192 ${fmtDate(was.baseline.due_date)}` : 'no dates'}${slip ? ` (${slipWords(slip)})` : ''}` : ''}${critical.has(t.key) ? '\nOn the critical path' : ''}${depLines(t.key)}`)),
+      gs && (gs !== s || ge !== e) ? sv('rect', { class: 'tl-ghost', x: x(gs), y: y + rowH - 5, width: Math.max(px * (dayDiff(gs, ge) + 1), 8), height: 4, rx: 2 }) : null,
+      slip ? sv('text', { class: `tl-slip ${slip > 0 ? 'late' : 'ahead'}`, x: bx + bw + 10, y: y + 19 }, slipText(slip)) : null);
     svg.append(row);
   });
   // The arrows go on top of the rows but never take a click or a hover away from them.
@@ -1025,12 +1067,20 @@ async function timelineTab(root, ctx) {
   const depNote = depResp === null ? 'The dependencies could not be loaded, so no arrows are drawn.'
     : !deps.length ? null
     : `${count(drawn)} drawn${deps.length > drawn ? `; ${count(deps.length - drawn)} not drawn because a task is not on the timeline` : ''}${depResp.truncated ? '; the project has more dependencies than one answer carries' : ''}.`;
-  root.append(h('div', { class: 'card' }, h('div', { class: 'row wrap', style: { marginBottom: '10px' } }, h('h2', { text: 'Timeline' }), h('span', { class: 'spacer' }),
+  const pick = bl && bl.list.items.length ? h('label', { class: 'row small' }, 'Baseline', h('select', { id: 'timeline-baseline', class: 'inline', 'aria-label': 'Compare with baseline', value: bl.chosen ? String(bl.chosen.id) : '',
+    onchange: (e) => { state.baselineChoice[key] = e.target.value; clear(root); timelineTab(root, ctx).catch((err) => toast(err.message, 'error')); } },
+    optionList([['', 'None'], ...bl.list.items.map((b) => [String(b.id), b.name])]))) : null;
+  const baseNote = bl === null ? 'The baselines could not be loaded, so nothing is compared.'
+    : !bl.list.items.length ? (hasRole('manager') && project.status !== 'archived' ? 'There is no baseline yet. Set one on the Reports tab to see how far the plan drifts from it.' : null)
+    : compare ? `Compared with \u201c${bl.chosen.name}\u201d, set ${fmtDate(bl.chosen.created_at.slice(0, 10))}. ${baselineFinishSentence(compare.summary)}` : null;
+  root.append(h('div', { class: 'card' }, h('div', { class: 'row wrap', style: { marginBottom: '10px' } }, h('h2', { text: 'Timeline' }), h('span', { class: 'spacer' }), pick,
     drawn ? h('label', { class: 'row small' }, h('input', { type: 'checkbox', checked: true, onchange: (e) => svg.classList.toggle('no-deps', !e.target.checked) }), 'Dependency arrows') : null,
     h('span', { class: 'legend' }, h('span', {}, h('span', { class: 'sw s-in_progress' }), 'In progress'), h('span', {}, h('span', { class: 'sw s-done' }), 'Done'), h('span', {}, h('span', { class: 'sw s-todo' }), 'To do'),
       h('span', {}, h('span', { class: 'sw s-blocked' }), 'Blocked'), h('span', {}, '\u25C6 Milestone'), h('span', {}, 'Red outline = critical path'),
-      drawn ? [h('span', {}, h('span', { class: 'sw-line ok' }), 'Dependency'), h('span', {}, h('span', { class: 'sw-line holding' }), 'Holding a task back'), h('span', {}, h('span', { class: 'sw-line conflict' }), 'Dates break it')] : null)),
+      drawn ? [h('span', {}, h('span', { class: 'sw-line ok' }), 'Dependency'), h('span', {}, h('span', { class: 'sw-line holding' }), 'Holding a task back'), h('span', {}, h('span', { class: 'sw-line conflict' }), 'Dates break it')] : null,
+      compare ? [h('span', {}, h('span', { class: 'sw-ghost' }), 'Baseline dates'), h('span', {}, '\u25C7 Baseline milestone'), h('span', {}, '+3d / \u22123d = later / earlier than the baseline')] : null)),
     h('div', { class: 'timeline-wrap' }, svg),
+    baseNote ? h('p', { class: 'small muted', id: 'timeline-baseline-note', style: { marginTop: '10px' }, text: baseNote }) : null,
     depNote ? h('p', { class: 'small muted', id: 'timeline-dep-note', style: { marginTop: '10px' }, text: depNote }) : null,
     unscheduled.length ? h('p', { class: 'small muted', style: { marginTop: '10px' }, text: `${plural(unscheduled.length, 'task')} without dates are not shown: ${unscheduled.slice(0, 8).map((t) => t.key).join(', ')}${unscheduled.length > 8 ? '\u2026' : ''}` }) : null,
     conflictList));
@@ -1081,6 +1131,7 @@ async function reportsTab(root, ctx) {
   }
   root.append(
     projectionCard(ctx),
+    baselineCard(ctx),
     h('div', { class: 'grid kpis', style: { marginTop: '16px' } }, kpi('Complete', `${Math.round(summary.progress.tasks_pct)}%`), kpi('Open tasks', m.open), kpi('Overdue', m.overdue, m.overdue ? 'bad' : ''), kpi('Due within 7 days', m.due_soon),
       kpi('Waiting / blocked', m.blocked, m.flagged_blocked ? 'warn' : ''), kpi('Unassigned', m.unassigned, m.unassigned ? 'warn' : ''),
       kpi('Hours logged', fmtHours(summary.hours.logged)), kpi('Est. remaining', fmtHours(summary.hours.remaining_estimate))),
@@ -1168,6 +1219,91 @@ function projectionCard(ctx) {
   load();
   return card;
 }
+function openBaselineForm(key, done) {
+  const name = h('input', { type: 'text', maxlength: 60, 'aria-label': 'Baseline name', onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); save.click(); } } });
+  const note = h('textarea', { maxlength: 500, 'aria-label': 'Baseline note', rows: 3 });
+  const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => {
+    const body = {};
+    if (name.value.trim()) body.name = name.value.trim();
+    if (note.value.trim()) body.note = note.value.trim();
+    const created = await api(`/projects/${key}/baselines`, { method: 'POST', body });
+    m.close();
+    done(created);
+  }) }, 'Set baseline');
+  const m = openModal({ title: 'Set a baseline', narrow: true,
+    content: h('div', { class: 'stack' }, h('p', { class: 'small muted', text: 'This freezes the plan as it is now: every task\u2019s dates, estimate and status, and the milestones. Later you can see how far the project has drifted from it. A baseline cannot be edited, only deleted.' }),
+      field('Name', name, 'Optional. Without one it is called Baseline 1, Baseline 2\u2026'), field('Note', note, 'Optional: why this plan, who agreed to it')),
+    footer: [h('span', { class: 'spacer' }), h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
+}
+function baselineCard(ctx) {
+  const { key, project } = ctx;
+  const manage = hasRole('manager') && project.status !== 'archived';
+  const card = h('div', { class: 'card', id: 'baselines', style: { marginTop: '16px' } }, h('h2', { text: 'Plan vs. actual' }), h('p', { class: 'muted', text: 'Loading\u2026' }));
+  let seq = 0;
+  async function load() {
+    const mine = ++seq;
+    let view;
+    try { view = await baselineView(key); } catch (e) {
+      if (mine !== seq || !ctx.alive()) return;
+      clear(card);
+      put(card, h('h2', { text: 'Plan vs. actual' }), h('p', { class: 'error-text', role: 'alert', id: 'baseline-error', text: e.message }));
+      return;
+    }
+    if (mine === seq && ctx.alive()) draw(view);
+  }
+  const added = (b) => { state.baselineChoice[key] = String(b.id); toast(`Baseline \u201c${b.name}\u201d set`, 'ok'); load(); };
+  function draw({ list, chosen, data }) {
+    clear(card);
+    const setButton = manage ? h('button', { class: 'btn small primary', id: 'baseline-set', onclick: () => openBaselineForm(key, added) }, 'Set baseline\u2026') : null;
+    if (!chosen) {
+      put(card, h('div', { class: 'row wrap' }, h('h2', { text: 'Plan vs. actual' }), h('span', { class: 'spacer' }), setButton),
+        h('p', { class: 'muted', id: 'baseline-empty', text: 'No baseline yet. A baseline freezes today\u2019s plan (every task\u2019s dates and estimate, and the milestones), so that later you can see how far the project has drifted from it.' }));
+      return;
+    }
+    const pickBaseline = h('select', { id: 'baseline-pick', class: 'inline', 'aria-label': 'Baseline to compare with', value: String(chosen.id),
+      onchange: (e) => { state.baselineChoice[key] = e.target.value; load(); } }, optionList(list.items.map((b) => [String(b.id), b.name])));
+    const removeButton = manage ? h('button', { class: 'btn small', id: 'baseline-delete', onclick: async () => {
+      if (!(await confirmBox(`Delete the baseline \u201c${chosen.name}\u201d? The tasks and milestones are not touched, but this comparison is gone for good.`, 'Delete', true))) return;
+      await guarded(removeButton, async () => { await api(`/projects/${key}/baselines/${chosen.id}`, { method: 'DELETE' }); delete state.baselineChoice[key]; toast('Baseline deleted', 'ok'); await load(); });
+    } }, 'Delete\u2026') : null;
+    const s = data.summary, t = s.tasks, ms = s.milestones;
+    const moved = data.tasks.some((r) => r.slip_days || r.start_shift_days || r.due_shift_days) || t.added || t.dropped || t.split || s.scope_hours.change || ms.slipped || ms.ahead || ms.dropped || ms.added || s.finish.shift_days;
+    const slipped = data.tasks.filter((r) => r.state === 'slipped');
+    const taskLink = (key2, title) => [h('a', { href: '#/t/' + key2 }, h('strong', { text: key2 })), ' ', title];
+    const listOf = (rows, total, render) => [rows.slice(0, 8).map((r, i) => [i ? '; ' : '', render(r)]), total > 8 ? `; and ${total - 8} more` : null];
+    const finishTile = s.finish.shift_days === null ? '\u2014' : s.finish.shift_days === 0 ? 'On plan' : slipText(s.finish.shift_days);
+    const scopeTile = !s.scope_hours.change ? 'No change' : `${s.scope_hours.change > 0 ? '+' : '\u2212'}${fmtHours(Math.abs(s.scope_hours.change))}`;
+    put(card,
+      h('div', { class: 'row wrap' }, h('h2', { text: 'Plan vs. actual' }), h('span', { class: 'spacer' }),
+        h('label', { class: 'row small' }, 'Baseline', pickBaseline), setButton, removeButton),
+      h('p', { class: 'small muted', id: 'baseline-about' }, `\u201c${chosen.name}\u201d was set ${fmtDate(chosen.created_at.slice(0, 10))}${chosen.created_by ? ` by ${chosen.created_by.display_name}` : ''}`,
+        ` and holds ${plural(chosen.leaf_tasks, 'task')} (${fmtHours(chosen.estimate_hours)}) and ${plural(chosen.milestones, 'milestone')}.`),
+      chosen.note ? h('p', { class: 'small', id: 'baseline-note', style: { whiteSpace: 'pre-wrap' }, text: chosen.note }) : null,
+      h('p', { id: 'baseline-headline', text: moved ? `${baselineFinishSentence(s)} ${baselineTaskSentence(s)}`.trim() : 'Nothing has moved since this baseline was set.' }),
+      h('div', { class: 'grid kpis', id: 'baseline-kpis' }, kpi('Finish vs baseline', finishTile, s.finish.shift_days > 0 ? 'bad' : s.finish.shift_days < 0 ? 'ok' : ''), kpi('Slipped', t.slipped, t.slipped ? 'bad' : ''),
+        kpi('Moved earlier', t.ahead, t.ahead ? 'ok' : ''), kpi('On plan', t.on_plan), kpi('Added', t.added, t.added ? 'warn' : ''), kpi('Dropped', t.dropped, t.dropped ? 'warn' : ''),
+        kpi('Scope', scopeTile, s.scope_hours.change ? 'warn' : ''), kpi('Milestones late', `${ms.slipped}/${ms.planned}`, ms.slipped ? 'bad' : '')),
+      slipped.length ? h('div', { class: 'scroll-x', style: { marginTop: '12px' } }, h('table', { class: 'table', id: 'baseline-slips', 'aria-label': 'Tasks that slipped most' },
+        h('thead', {}, h('tr', {}, ['Task', 'Who', 'Baseline', 'Now', 'Slip'].map((x) => h('th', { text: x })))),
+        h('tbody', {}, slipped.slice(0, 10).map((r) => h('tr', {}, h('td', {}, taskLink(r.key, r.title)), h('td', { text: r.assignee ? r.assignee.display_name : '\u2014' }),
+          h('td', { class: 'nowrap', text: fmtDate(r.baseline.finish) }), h('td', { class: 'nowrap', text: `${r.now.finished ? 'Done ' : ''}${fmtDate(r.now.finish)}${r.overdue ? ' (overdue)' : ''}` }),
+          h('td', { class: 'nowrap overdue-text', text: slipText(r.slip_days) })))))) : h('p', { class: 'small muted', id: 'baseline-no-slips', style: { marginTop: '12px' }, text: 'No task has slipped.' }),
+      slipped.length > 10 ? h('p', { class: 'small muted', text: `\u2026and ${slipped.length - 10} more` }) : null,
+      data.tasks_truncated ? h('p', { class: 'small muted', text: 'This project has more tasks than one comparison carries; the rest are not listed.' }) : null,
+      data.milestones.items.length ? h('div', { class: 'scroll-x', style: { marginTop: '12px' } }, h('table', { class: 'table', id: 'baseline-milestones', 'aria-label': 'Milestones against the baseline' },
+        h('thead', {}, h('tr', {}, ['Milestone', 'Baseline', 'Now', 'Change'].map((x) => h('th', { text: x })))),
+        h('tbody', {}, data.milestones.items.map((r) => h('tr', {}, h('td', { text: r.name }), h('td', { class: 'nowrap', text: fmtDate(r.baseline_due_date) }), h('td', { class: 'nowrap', text: r.due_date ? fmtDate(r.due_date) : '\u2014' }),
+          h('td', { class: 'nowrap ' + (r.state === 'slipped' ? 'overdue-text' : ''), text: r.state === 'dropped' ? 'Dropped' : r.state === 'on_plan' ? 'On plan' : slipText(r.slip_days) })))))) : null,
+      data.milestones.added.length ? h('p', { class: 'small', id: 'baseline-new-milestones', style: { marginTop: '10px' } }, h('strong', { text: 'Milestones added since: ' }),
+        data.milestones.added.map((m) => `${m.name} (due ${fmtDate(m.due_date)})`).join('; ')) : null,
+      data.added.length ? h('p', { class: 'small', id: 'baseline-added', style: { marginTop: '10px' } }, h('strong', { text: 'Tasks added since: ' }), listOf(data.added, t.added, (r) => taskLink(r.key, r.title))) : null,
+      data.dropped.length ? h('p', { class: 'small', id: 'baseline-dropped', style: { marginTop: '10px' } }, h('strong', { text: 'Tasks dropped since: ' }),
+        listOf(data.dropped, t.dropped, (r) => (r.reason === 'cancelled' ? [taskLink(r.key, r.title), ' (cancelled)'] : [h('strong', { text: r.key }), ` ${r.title} (deleted)`]))) : null,
+      h('p', { class: 'small muted', style: { marginTop: '10px' }, text: `As of ${fmtDate(data.as_of)}. Only tasks without subtasks are compared. A task finishes on the day it was completed, or on its due date while it is open; a slip is the difference to the baseline in calendar days. A baseline holds dates, estimates and status, not people or priorities.` }));
+  }
+  load();
+  return card;
+}
 function burndownChart(data) {
   const W = 760, H = 270, L = 44, R = 16, T = 14, B = 34;
   const pts = data.days;
@@ -1244,6 +1380,8 @@ function describeActivity(a) {
     case 'project_field.deleted': return `deleted the project field \u201c${d.label}\u201d (removed ${plural(d.values_removed, 'value')})`;
     case 'project.member_added': return `added ${d.user} to the project`;
     case 'project.member_removed': return `removed ${d.user} from the project`;
+    case 'baseline.created': return `set the baseline \u201c${d.name}\u201d (${plural(d.tasks, 'task')}, ${plural(d.milestones, 'milestone')})`;
+    case 'baseline.deleted': return `deleted the baseline \u201c${d.name}\u201d`;
     case 'import.completed': return `imported tasks from ${d.source === 'msproject' ? 'Microsoft Project' : 'CSV'}: ${d.created} created, ${d.skipped_duplicates} skipped, ${d.errors} errors`;
     default: return a.action;
   }
