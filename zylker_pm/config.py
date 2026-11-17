@@ -39,6 +39,8 @@ class Config:
     recurrence_check_minutes: int = 15  # how often `serve` looks for recurring tasks that are due (0 = never)
     auth_failure_limit: int = 0  # failed sign-ins per address (in 5 minutes) before it is blocked; 0 = off. from_env turns on 10
     rate_limit_per_minute: int = 0  # sustained requests per user per minute; 0 = off. from_env turns on 600
+    webhook_allow_private: bool = False  # let webhooks reach private/loopback addresses and use plain http (internal receivers)
+    webhook_interval_seconds: int = 0  # how often `serve` delivers queued webhooks (0 = never; from_env turns on 2)
     proxy_hops: int = 0  # trusted reverse proxies in front of the app; decides which client address the audit log records
 
     @classmethod
@@ -66,6 +68,11 @@ class Config:
                 numbers[attr] = int(get(name, default))
             except ValueError:
                 raise ValueError("ZYLKER_%s must be an integer" % name) from None
+        try:
+            numbers["webhook_interval_seconds"] = int(get("WEBHOOK_INTERVAL_SECONDS", "2"))
+        except ValueError:
+            raise ValueError("ZYLKER_WEBHOOK_INTERVAL_SECONDS must be an integer") from None
+        allow_private = get("WEBHOOK_ALLOW_PRIVATE", "").strip().lower() in ("1", "true", "yes", "on")
         cfg = cls(
             db_path=get("DB", "zylker.db"),
             host=get("HOST", "127.0.0.1"),
@@ -76,6 +83,7 @@ class Config:
             cliq_bot_unique_name=get("CLIQ_BOT_UNIQUE_NAME"),
             proxy_hops=proxy_hops,
             recurrence_check_minutes=recurrence_check_minutes,
+            webhook_allow_private=allow_private,
             **numbers,
         )
         cfg.validate()
@@ -91,6 +99,8 @@ class Config:
             raise ValueError("ZYLKER_AUTH_FAILURE_LIMIT must be between 0 and 1000")
         if not 0 <= self.rate_limit_per_minute <= 100_000:
             raise ValueError("ZYLKER_RATE_LIMIT_PER_MINUTE must be between 0 and 100000")
+        if not 0 <= self.webhook_interval_seconds <= 3600:
+            raise ValueError("ZYLKER_WEBHOOK_INTERVAL_SECONDS must be between 0 and 3600")
         if self.cliq_endpoint:
             parsed = urlparse(self.cliq_endpoint)
             local = parsed.hostname in LOOPBACK_HOSTS
