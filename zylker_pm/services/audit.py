@@ -44,6 +44,8 @@ SEVERITIES = ("info", "notice", "warning", "error")
 ACTION_SEVERITY = {
     "auth.failed": "warning",
     "auth.denied": "warning",
+    "auth.throttled": "warning",
+    "auth.unblocked": "notice",
     "system.error": "error",
     "user.created": "notice",
     "user.updated": "notice",
@@ -333,6 +335,10 @@ def summary(ctx, params):
         int(json.loads(r["details"] or "{}").get("count", 1))
         for r in conn.execute("SELECT details FROM activity WHERE action = 'auth.denied' AND created_at >= ?", (since,))
     )
+    throttled = sum(
+        int(json.loads(r["details"] or "{}").get("count", 1))
+        for r in conn.execute("SELECT details FROM activity WHERE action = 'auth.throttled' AND created_at >= ?", (since,))
+    )
     return {
         "days": days,
         "from": first_day.isoformat(),
@@ -347,6 +353,7 @@ def summary(ctx, params):
         "security": {
             "failed_sign_ins": failed_attempts,
             "permission_denials": denials,
+            "throttled": throttled,
             "errors": by_severity["error"],
             "top_failing_addresses": [{"ip": ip, "attempts": n} for ip, n in sorted(by_ip.items(), key=lambda kv: (-kv[1], kv[0]))[:5]],
         },
