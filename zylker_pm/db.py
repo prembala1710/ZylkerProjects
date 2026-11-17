@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Added in schema v2. Shared by fresh databases (SCHEMA) and the v1 -> v2 migration so the two can never drift.
 PROJECT_FIELDS_SCHEMA = """
@@ -118,9 +118,55 @@ CREATE TABLE recurrence_occurrences (
 );
 """
 
+# Added in schema v5: outbound webhooks. A delivery row is the "outbox": it is written in the same transaction as
+# the change it announces, so an event is queued if and only if the change was committed.
+WEBHOOK_SCHEMA = """
+CREATE TABLE webhooks (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    url TEXT NOT NULL,
+    secret TEXT NOT NULL,
+    events TEXT NOT NULL,
+    project_key TEXT,
+    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+    failure_streak INTEGER NOT NULL DEFAULT 0,
+    disabled_reason TEXT,
+    disabled_at TEXT,
+    last_attempt_at TEXT,
+    last_success_at TEXT,
+    last_status INTEGER,
+    last_error TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE webhook_deliveries (
+    id INTEGER PRIMARY KEY,
+    webhook_id INTEGER NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    event TEXT NOT NULL,
+    event_id INTEGER,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','sending','delivered','failed','cancelled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    claimed_at TEXT,
+    response_status INTEGER,
+    error TEXT,
+    duration_ms INTEGER,
+    attempt_log TEXT NOT NULL DEFAULT '[]',
+    redelivery_of INTEGER,
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX idx_wd_due ON webhook_deliveries (status, next_attempt_at);
+CREATE INDEX idx_wd_hook ON webhook_deliveries (webhook_id, id);
+CREATE INDEX idx_wd_finished ON webhook_deliveries (finished_at);
+"""
+
 # Each entry upgrades a database from version N to N + 1, inside one transaction. A new database is created
 # as version 1 and then walked through every migration, so a fresh install and an upgrade cannot differ.
-MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA}
+MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA}
 
 SCHEMA = """
 CREATE TABLE users (
