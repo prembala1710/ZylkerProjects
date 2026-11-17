@@ -9,16 +9,17 @@ import logging
 import sqlite3
 import sys
 import threading
+from datetime import datetime, timezone
 from socketserver import ThreadingMixIn
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
-from . import __version__, notify
+from . import __version__, netguard, notify
 from .app import App
 from .config import LOOPBACK_HOSTS, Config
 from .db import connect, init_db
 from .domain import ROLES
 from .errors import ApiError
-from .services import csvio, recurrence, reports, users
+from .services import csvio, recurrence, reports, users, webhooks
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -74,6 +75,9 @@ def cmd_serve(args, cfg):
         except Exception:  # noqa: BLE001
             logging.getLogger("zylker.recurrence").exception("recurring task check failed")
         threading.Thread(target=_recurrence_loop, args=(app, cfg.recurrence_check_minutes, stop), daemon=True).start()
+    if cfg.webhook_interval_seconds:
+        sender = netguard.make_sender(cfg.webhook_allow_private)
+        threading.Thread(target=_webhook_loop, args=(cfg, sender, cfg.webhook_interval_seconds, stop), daemon=True).start()
     print("Zylker Projects %s on http://%s:%d  (db: %s, timezone: %s, Cliq: %s)" % (
         __version__, cfg.host, cfg.port, cfg.db_path, cfg.timezone, "on" if cfg.cliq_endpoint else "off"))  # fmt: skip
     try:
@@ -159,6 +163,26 @@ def _recurrence_loop(app, minutes, stop):
             log.exception("recurring task check failed")
 
 
+def cmd_webhook_run(args, cfg):
+    """Deliver queued webhooks now (for installations that run `serve` with ZYLKER_WEBHOOK_INTERVAL_SECONDS=0)."""
+    init_db(cfg.db_path)
+    sender = netguard.make_sender(cfg.webhook_allow_private)
+    report = webhooks.run_due(cfg.db_path, datetime.now(timezone.utc), sender, limit=args.limit)
+    print(json.dumps(report, indent=2))
+    return 0
+
+
+def _webhook_loop(cfg, sender, seconds, stop):
+    log = logging.getLogger("zylker.webhooks")
+    while not stop.wait(seconds):
+        try:
+            report = webhooks.run_due(cfg.db_path, datetime.now(timezone.utc), sender)
+            for hook in report["disabled"]:
+                log.warning("webhook %r was switched off (%s)", hook["name"], hook["reason"])
+        except Exception:  # noqa: BLE001 - a failed pass must never stop the next one
+            log.exception("webhook delivery pass failed")
+
+
 def cmd_backup(args, cfg):
     import os
 
@@ -241,6 +265,10 @@ def build_parser():
     p.add_argument("--project", help="only this project")
     p.add_argument("--dry-run", action="store_true", help="show what would be created without creating it")
     p.set_defaults(fn=cmd_recur_run)
+
+    p = sub.add_parser("webhook-run", help="deliver the queued webhooks that are due (retries included)")
+    p.add_argument("--limit", type=int, default=100, help="most deliveries to attempt in this run")
+    p.set_defaults(fn=cmd_webhook_run)
 
     p = sub.add_parser("backup", help="write a consistent copy of the database")
     p.add_argument("path")
