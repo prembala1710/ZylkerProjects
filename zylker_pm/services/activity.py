@@ -13,11 +13,17 @@ def log(ctx, action, *, project_id=None, project_key=None, task_id=None, task_ke
     if project_key is None and project_id is not None:
         row = ctx.conn.execute("SELECT key FROM projects WHERE id = ?", (project_id,)).fetchone()
         project_key = row[0] if row else None
-    ctx.conn.execute(
+    cur = ctx.conn.execute(
         "INSERT INTO activity (project_id, project_key, task_id, task_key, actor_id, action, details, created_at, ip, request_id) "
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (project_id, project_key, task_id, task_key, ctx.actor_id, action, json.dumps(details or {}), ctx.now_iso, ctx.ip, ctx.request_id),
     )
+    from . import webhooks  # local import: webhooks itself logs through this module
+
+    webhooks.enqueue(
+        ctx.conn, ctx.now_iso, event_id=cur.lastrowid, action=action, project_key=project_key, task_key=task_key,
+        actor_id=ctx.actor_id, details=details,
+    )  # fmt: skip
 
 
 def detach_task(conn, task_ids):
