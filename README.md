@@ -26,6 +26,8 @@ standard library alone - **no packages to install, no build step** - and stores 
   per project (see [Custom project fields](#custom-project-fields)).
 - **Admin audit log** - one screen for administrators showing every change plus failed sign-ins, permission denials, exports and server
   errors, with filters, a live view and CSV export (see [Audit log](#audit-log)).
+- **Recurring tasks** - "every other Monday", "the last day of each month": managers define a schedule and a task template, the system creates the
+  tasks on time without ever duplicating or flooding (see [Recurring tasks](#recurring-tasks)).
 
 ## Quick start
 
@@ -48,6 +50,7 @@ The same commands are available as `zylker-pm ...` after `pip install .`. Everyt
 | `zylker-pm create-user USER --role member --name "..." [--capacity 30]` | Add a person and print their token |
 | `zylker-pm rotate-token USER` | Issue a new token; the old one stops working immediately |
 | `zylker-pm digest [--days 3] [--project KEY] [--post]` | Print the overdue / due-soon digest; `--post` sends it to Cliq |
+| `zylker-pm recur-run [--project KEY] [--dry-run]` | Create the recurring tasks that are due (safe to run from cron as often as you like) |
 | `zylker-pm backup FILE [--force]` | Write a consistent copy of the database (safe while the server runs) |
 | `zylker-pm import-csv FILE --project KEY --as USER [--dry-run] [--add-missing-members]` | Import tasks; exit code 3 means "finished, but some rows had errors" |
 | `zylker-pm seed-demo` | Load fictional sample data (refuses unless there are no projects) |
@@ -68,6 +71,7 @@ All settings are environment variables; nothing is read from the repository.
 | `ZYLKER_CLIQ_ENDPOINT` | *(empty = notifications off)* | A Cliq **incoming webhook URL**. It contains a key - treat it as a secret. Must be `https` (plain `http` only for localhost) |
 | `ZYLKER_CLIQ_BOT_UNIQUE_NAME` | *(empty)* | Post as this bot (appended as `bot_unique_name`, the same convention as the repository's GitHub Informer workflow) |
 | `ZYLKER_PROXY_HOPS` | `0` | How many reverse proxies you trust in front of the app (0-5). It decides which client address the [audit log](#audit-log) records: with `0` the connection's address is used and `X-Forwarded-For` is ignored (a client can forge it); with `1` the last entry of `X-Forwarded-For` is used, with `2` the second from the right, and so on |
+| `ZYLKER_RECURRENCE_CHECK_MINUTES` | `15` | How often `serve` looks for recurring tasks that are due (0-1440; `0` turns the check off and leaves it to `zylker-pm recur-run`) |
 
 ## Custom project fields
 
@@ -122,13 +126,33 @@ Administrators get one place to see **everything that happens**: *Admin -> Audit
 Behind a reverse proxy, set `ZYLKER_PROXY_HOPS` so the log records the real client rather than the proxy.
 This is a record for people to read, not an alerting system, and it does not throttle: do that at the proxy.
 
+## Recurring tasks
+
+For work that comes round again - the weekly report, the month-end close, the quarterly access review - a manager defines a **rule** on the project's
+*Settings* tab (or with `POST /api/projects/{key}/recurrences`): a schedule, and the task to create.
+
+- **Schedules:** daily, weekly (any days, every N weeks) and monthly (a day of the month, or the last day; the 31st becomes the 28th/29th/30th in short
+  months), with an optional end date or maximum number of tasks. The form shows the next dates before you save.
+- **Template:** title (`{date}` becomes the date), description, type, priority, assignee, estimate, labels, and how many days after it starts the task is due.
+- **Runs by itself.** `serve` checks every 15 minutes (`ZYLKER_RECURRENCE_CHECK_MINUTES`) and once at start-up, so a restart over a due date catches up.
+  Without `serve`, schedule `zylker-pm recur-run` from cron, e.g. `5 0 * * *`.
+- **Never twice.** Every date is recorded the moment it is handled, so repeated or simultaneous runs cannot duplicate a task.
+- **Never a flood.** After downtime only the latest 5 missed dates become tasks; the rest are recorded as skipped and show up in the audit log. New, resumed and
+  edited rules start from today and never backfill.
+- **Sensible about people and projects.** Archived and completed projects get nothing (the dates wait); if the assignee has left the project the task is created
+  unassigned and says why; if the rule's creator is deactivated the project owner becomes the reporter.
+- **Visible.** Rules show their next dates and every handled date (with the task it made, or why it was skipped); changes and generated tasks appear in the audit
+  log under *Recurring tasks*. Deleting a rule keeps the tasks it made.
+
+Day boundaries follow `ZYLKER_TIMEZONE`. Reference: [docs/API.md](docs/API.md#recurring-tasks).
+
 ## Roles
 
 | Role | Can |
 |---|---|
 | **viewer** | Read everything: projects, tasks, reports, exports |
 | **member** | Viewer + create/edit tasks, comment, log time and link dependencies **in projects they belong to** |
-| **manager** | Member + everything in *any* project: create and edit projects, manage members and milestones, delete tasks, import CSV, see everyone's timesheet |
+| **manager** | Member + everything in *any* project: create and edit projects, manage members, milestones and recurring tasks, delete tasks, import CSV, see everyone's timesheet |
 | **admin** | Manager + manage users and roles, define custom project fields, delete projects, read the audit log |
 
 Project membership also controls who can be *assigned* work. Archived projects are read-only for all roles.
@@ -252,9 +276,9 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~280 tests, no dependencies
+python -m unittest discover -s tests -v     # ~330 tests, no dependencies
 pip install playwright && playwright install chromium
-python -m unittest tests.test_ui_e2e -v      # 33 real-browser tests (skipped automatically without Playwright)
+python -m unittest discover -s tests -p "test_ui_*.py" -v   # 38 real-browser tests (skipped automatically without Playwright)
 ```
 
 The backend tests include hand-computed expectations for the critical path, workload, burndown and health rules, deadlock
@@ -272,8 +296,8 @@ tests/                 unit, HTTP, CLI and browser tests
 
 ## Limitations and ideas for later
 
-Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), recurring tasks, task templates or
-attachments; custom project fields cannot be reordered or filtered on yet; the audit log has no retention policy or alerting; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), task templates or
+attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
