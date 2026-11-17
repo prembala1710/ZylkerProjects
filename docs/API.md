@@ -127,6 +127,7 @@ Every change to data, by the person who made it, with old and new values - plus 
 | `user` | `created`, `updated` (role, active, ...), `token_rotated` | notice |
 | `import` | `completed` | notice |
 | `auth` | `failed` (missing or invalid token), `denied` (role too low, not a project member), `session_started`, `throttled`, `unblocked` (see [Rate limiting](#rate-limiting-and-brute-force-protection)) | warning, warning, info, warning, notice |
+| `webhook` | `created`, `updated`, `deleted`, `secret_rotated`, `test`, `redelivered`, `disabled` (see [Webhooks](#webhooks)) | info (`deleted` and `secret_rotated` are notice, `disabled` is warning) |
 | `data` | `exported` (task CSV export, with row count) | notice |
 | `audit` | `exported` (the audit log itself) | notice |
 | `system` | `error` (unhandled exception: route and exception *type* only) | error |
@@ -207,6 +208,84 @@ and is bounded (at most 10,000 tracked entries); it is lost on restart.
 
 Audit events (category `auth`): `throttled` (warning) with `reason` `blocked` (a block starts: seconds, strikes, failures), `still_blocked` or `rate_limited`
 (repeats merged, with a `count`), and `unblocked` (notice). The audit summary reports `security.throttled`.
+
+## Webhooks
+
+Webhooks tell other systems when something happens: every audit event ([Audit log](#audit-log)) that matches a subscription is POSTed, signed, to the
+URL an administrator registered. All endpoints are admin-only.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/webhooks` | admin | `{items, categories, limits}`: every webhook with its health (`failure_streak`, `last_status`, `last_error`, `disabled_reason`) and delivery counts per status, the categories that can be subscribed to, and the retry limits |
+| `POST /api/webhooks` | admin | `{name, url, events, project?, secret?, active?}`. The response contains the signing `secret` - **once**. At most 20 webhooks |
+| `GET /api/webhooks/{webhook_id}` | admin | One webhook (never the secret, only `secret_hint`) |
+| `PATCH /api/webhooks/{webhook_id}` | admin | Any of `name`, `url`, `events`, `project`, `active`. Switching off cancels what is queued; switching on resets the failure count |
+| `DELETE /api/webhooks/{webhook_id}` | admin | Also deletes its delivery log |
+| `POST /api/webhooks/{webhook_id}/rotate-secret` | admin | `{id, secret, secret_hint}`: the new secret, shown once; the old one stops signing immediately |
+| `POST /api/webhooks/{webhook_id}/test` | admin | Queues a `webhook.ping` for this webhook (202). Delivered like any event, so it shows whether the receiver verifies the signature |
+| `GET /api/webhooks/{webhook_id}/deliveries` | admin | The delivery log, newest first. `?status=pending,failed` `?event=task.created` `?limit=` (1-100, default 25) `?before=<id>` |
+| `GET /api/webhooks/{webhook_id}/deliveries/{delivery_id}` | admin | One delivery with its `payload` and the `attempt_log` (time, HTTP status, error code, milliseconds per attempt) |
+| `POST /api/webhooks/{webhook_id}/deliveries/{delivery_id}/redeliver` | admin | Sends that event again as a new delivery (`redelivery_of` points back); the original stays in the log. 409 `webhook_inactive` while the webhook is off |
+
+*Definition:* `name` (1-60 chars, unique ignoring case) · `url` (see below) · `events`: a non-empty list (at most 30) of `*`, `category.*` or `category.action`
+using the categories from [What is recorded](#what-is-recorded) (`task.created`, `project.*`, `auth.*`, ...) - webhook events themselves cannot be subscribed to ·
+`project`: a project key to receive only that project's events (`null` for all) · `secret`: optional, 16-200 ASCII characters; generated (`whsec_...`) when omitted.
+
+*URLs.* Must be `https://` with a host name, no user name or password, no `#fragment`. Literal private addresses (`10.x`, `192.168.x`, `127.x`, `169.254.169.254`, `::1`, ...) and names such
+as `localhost` or `*.local` are refused when the webhook is saved. **Because a name can be re-pointed afterwards, the address is checked again at delivery:** the server resolves the
+name itself, refuses the delivery (`blocked_address`) if *any* answer is not a public address, and connects to the address it checked. Redirects are not followed and response bodies are
+not kept. Installations whose receivers are on the internal network set `ZYLKER_WEBHOOK_ALLOW_PRIVATE=1`, which also permits plain `http`.
+
+### What is sent
+
+A `POST` with `Content-Type: application/json`:
+
+```json
+{"delivery_id": 41, "attempt": 1, "webhook": {"id": 2, "name": "Ops channel"},
+ "event": "task.status_changed", "event_id": 1873, "occurred_at": "2026-10-16T09:00:00Z",
+ "project": "WEB", "task": "WEB-12", "actor": {"username": "alice", "display_name": "Alice"},
+ "details": {"status": ["todo", "in_progress"]}}
+```
+
+`event_id` is the audit event's id (`null` for a ping); `details` is exactly what the audit log holds for the event (`{"truncated": true}` if it exceeded 64 KB). Headers:
+
+| Header | Meaning |
+|---|---|
+| `X-Zylker-Event` | The event name, e.g. `task.created` |
+| `X-Zylker-Delivery` | The delivery id. **The same for every attempt** - use it to ignore repeats |
+| `X-Zylker-Attempt` | 1 for the first try, up to 6 |
+| `X-Zylker-Timestamp` | Seconds since the epoch when this attempt was signed |
+| `X-Zylker-Signature` | `v1=` + hex HMAC-SHA256 of `"<timestamp>.<raw body>"` with the webhook's secret |
+
+*Verifying* (Python; any language with HMAC-SHA256 works the same way): compute the HMAC over the **raw** request body, compare in constant time, and refuse timestamps more than five minutes
+away from your clock so a captured request cannot be replayed.
+
+```python
+import hmac, time
+from hashlib import sha256
+
+def verify(secret, headers, raw_body, tolerance=300):
+    ts = headers["X-Zylker-Timestamp"]
+    if abs(time.time() - int(ts)) > tolerance:
+        return False
+    expected = "v1=" + hmac.new(secret.encode(), ts.encode() + b"." + raw_body, sha256).hexdigest()
+    return hmac.compare_digest(expected, headers["X-Zylker-Signature"])
+```
+
+### Delivery guarantees
+
+* **Queued with the change.** The delivery row is written in the same database transaction as the audit event, so a rolled-back request announces nothing and a crash cannot lose an announcement.
+* **At least once, not in order.** Any 2xx answer is success; anything else (including a timeout after 10 seconds) is retried after 1 minute, 5 minutes, 30 minutes, 2 hours and 6 hours, then the delivery is `failed`.
+  Deliveries to one webhook may arrive out of order, and an attempt that timed out may still have been processed: deduplicate on `X-Zylker-Delivery` and order by `event_id`.
+* **Statuses:** `pending` (waiting for its first or next attempt), `sending`, `delivered`, `failed` (gave up, or `queue_full`), `cancelled` (the webhook was switched off or disabled).
+* **A failing receiver is switched off.** After 15 failed attempts in a row, or at once on `410 Gone`, the webhook is disabled (`disabled_reason`: `too_many_failures` or `gone`), its queue is cancelled and an
+  `webhook.disabled` warning is written to the audit log. Switch it on again with `PATCH {"active": true}`.
+* **Bounded.** At most 1,000 undelivered events per webhook; further events are recorded as `failed` with error `queue_full`. Finished deliveries are deleted after 30 days.
+* **Error codes** in `error`: `http_<status>`, `timeout`, `connection_refused`, `connection_failed`, `dns_failure`, `blocked_address`, `invalid_url`, `tls_certificate`, `tls_error`, `protocol_error`, `network_error`.
+* **Who delivers.** `serve` delivers every `ZYLKER_WEBHOOK_INTERVAL_SECONDS` (default 2); without it run `zylker-pm webhook-run` from cron. Several processes may run at once; each delivery is claimed by exactly one.
+
+Audit events (category `webhook`): `created`, `updated` (with the changes; URLs appear as host names only), `deleted` (notice), `secret_rotated` (notice), `test`, `redelivered`, and `disabled` (warning, written by the system).
+The secret and the URL's path and query never appear in the audit log.
 
 ## Tasks
 

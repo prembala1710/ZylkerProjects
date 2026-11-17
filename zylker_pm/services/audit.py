@@ -37,6 +37,7 @@ CATEGORIES = {
     "data": "Data exports",
     "system": "System",
     "audit": "Audit log",
+    "webhook": "Webhooks",
 }
 SEVERITIES = ("info", "notice", "warning", "error")
 
@@ -57,6 +58,9 @@ ACTION_SEVERITY = {
     "import.completed": "notice",
     "data.exported": "notice",
     "audit.exported": "notice",
+    "webhook.disabled": "warning",
+    "webhook.deleted": "notice",
+    "webhook.secret_rotated": "notice",
 }
 
 MERGE_WINDOW_SECONDS = 300  # repeats of the same security event inside this window become one counted row
@@ -114,6 +118,9 @@ def record(conn, now_iso, action, *, actor_id=None, ip=None, request_id=None, de
         "INSERT INTO activity (actor_id, action, details, created_at, ip, request_id) VALUES (?,?,?,?,?,?)",
         (actor_id, action, json.dumps(details), now_iso, ip, request_id),
     )
+    from . import webhooks  # local import: webhooks uses this module to record its own events
+
+    webhooks.enqueue(conn, now_iso, event_id=cur.lastrowid, action=action, actor_id=actor_id, details=details)
     return cur.lastrowid
 
 
