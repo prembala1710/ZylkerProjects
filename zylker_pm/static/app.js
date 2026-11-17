@@ -830,6 +830,11 @@ function describeActivity(a) {
     case 'project_field.created': return `defined the ${FIELD_TYPE_LABEL[d.type] || ''} project field \u201c${d.label}\u201d`;
     case 'project_field.updated': return `changed the project field \u201c${fieldLabel(d.key)}\u201d (${change(d.changes)})`;
     case 'project_field.deleted': return `deleted the project field \u201c${d.label}\u201d (removed ${plural(d.values_removed, 'value')})`;
+    case 'recurrence.created': return `set up the recurring task \u201c${d.title}\u201d (${d.schedule})`;
+    case 'recurrence.updated': return `changed the recurring task \u201c${d.title}\u201d (${change(d.changes)})`;
+    case 'recurrence.deleted': return `deleted the recurring task \u201c${d.title}\u201d (${plural(d.tasks_created, 'task')} created so far)`;
+    case 'recurrence.generated': return `created ${t} from the recurring task \u201c${d.title}\u201d for ${d.occurrence}`;
+    case 'recurrence.skipped': return `skipped ${plural(d.count, 'date')} of the recurring task \u201c${d.title}\u201d (${String(d.reason).replace(/_/g, ' ')})`;
     case 'project.member_added': return `added ${d.user} to the project`;
     case 'project.member_removed': return `removed ${d.user} from the project`;
     case 'import.completed': return `imported tasks from CSV: ${d.created} created, ${d.skipped_duplicates} skipped, ${d.errors} errors`;
@@ -890,6 +895,7 @@ async function settingsTab(root, ctx) {
       manage ? h('div', {}, save) : h('p', { class: 'small muted', text: 'Only managers and admins can edit project details.' })),
     h('div', { class: 'card' }, h('h2', { text: 'Members' }), h('p', { class: 'small muted', text: 'Members can be assigned work and can edit tasks in this project.' }), memberList,
       manage ? h('div', { class: 'row', style: { marginTop: '10px' } }, addSel, h('button', { class: 'btn', onclick: (e) => guarded(e.target, async () => { if (!addSel.value) return; Object.assign(project, await api(`/projects/${key}/members`, { method: 'POST', body: { username: addSel.value } })); route(); }) }, 'Add')) : null)),
+    recurrenceCard(project),
     manage ? importCard(key) : null,
     hasRole('admin') ? h('div', { class: 'card', style: { marginTop: '16px' } }, h('h2', { text: 'Danger zone' }), h('p', { class: 'small muted', text: 'Deleting a project permanently removes its tasks, comments and time entries. A record of what happened stays in the audit log.' }),
       h('button', { class: 'btn danger', onclick: () => deleteProjectDialog(project) }, 'Delete project\u2026')) : null);
@@ -918,6 +924,139 @@ function deleteProjectDialog(project) {
   const go = h('button', { class: 'btn danger', disabled: true, onclick: () => guarded(go, async () => { await api(`/projects/${project.key}`, { method: 'DELETE', query: { confirm: project.key } }); m.close(); await refreshProjects(); location.hash = '#/dashboard'; toast('Project deleted', 'ok'); }) }, 'Delete forever');
   input.addEventListener('input', () => { go.disabled = input.value !== project.key; });
   const m = openModal({ title: `Delete ${project.name}?`, narrow: true, content: h('div', { class: 'stack' }, h('p', { text: `This cannot be undone. Type ${project.key} to confirm.` }), input), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), go] });
+}
+
+/* ---------- recurring tasks (project settings) ---------- */
+const WEEKDAY_LABEL = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
+const FREQUENCY_LABEL = { daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly' };
+const FREQUENCY_UNIT = { daily: 'day(s)', weekly: 'week(s)', monthly: 'month(s)' };
+const RECURRENCE_BADGE = { active: 'active', paused: 'archived', finished: 'done' };
+
+function recurrenceCard(project) {
+  const manage = hasRole('manager') && project.status !== 'archived';
+  const list = h('div', { class: 'recurrence-list' });
+  const load = async () => {
+    try {
+      const data = await api(`/projects/${project.key}/recurrences`);
+      clear(list);
+      if (!data.items.length) list.append(h('div', { class: 'empty', text: 'No recurring tasks yet.' }));
+      for (const r of data.items) list.append(recurrenceRow(project, r, manage, load));
+    } catch (e) { clear(list); list.append(h('p', { class: 'error-text', text: e.message })); }
+  };
+  const card = h('div', { class: 'card', style: { marginTop: '16px' } },
+    h('div', { class: 'row' }, h('h2', { text: 'Recurring tasks' }), h('span', { class: 'spacer' }),
+      manage ? h('button', { class: 'btn primary small', onclick: () => openRecurrenceDialog(project, null, load) }, '+ New recurring task') : null),
+    h('p', { class: 'small muted', text: `Tasks are created automatically on a schedule (dates follow the server's timezone, ${state.meta.timezone}).` }), list);
+  load();
+  return card;
+}
+function recurrenceRow(project, r, manage, reload) {
+  const next = r.next_dates.slice(0, 3).map(fmtDate).join(', ');
+  const status = r.status.charAt(0).toUpperCase() + r.status.slice(1);
+  return h('div', { class: 'item' },
+    h('div', { class: 'grow' },
+      h('strong', { text: r.title }), ' ', badge(RECURRENCE_BADGE[r.status], status),
+      h('div', { class: 'small muted', text: `${r.schedule}${r.assignee ? ' \u00b7 ' + r.assignee : ''} \u00b7 ${plural(r.tasks_created, 'task')} created` }),
+      r.status === 'active' ? h('div', { class: 'small muted', text: `Next: ${next}` }) : null),
+    h('button', { class: 'btn small', onclick: () => showOccurrences(r) }, 'History'),
+    manage ? [
+      h('button', { class: 'btn small', onclick: () => openRecurrenceDialog(project, r, reload) }, 'Edit'),
+      h('button', { class: 'btn small', onclick: (e) => guarded(e.target, async () => { await api('/recurrences/' + r.id, { method: 'PATCH', body: { active: !r.active } }); await reload(); }) }, r.active ? 'Pause' : 'Resume'),
+      h('button', { class: 'btn small danger', onclick: (e) => guarded(e.target, async () => {
+        if (!(await confirmBox(`Delete the recurring task \u201c${r.title}\u201d? Tasks it already created stay.`, 'Delete', true))) return;
+        await api('/recurrences/' + r.id, { method: 'DELETE' });
+        await reload();
+      }) }, 'Delete')] : null);
+}
+async function showOccurrences(r) {
+  const box = h('div', { class: 'stack' }, h('p', { class: 'small muted', text: 'Loading\u2026' }));
+  const m = openModal({ title: `History: ${r.title}`, narrow: true, content: box, footer: [h('button', { class: 'btn primary', onclick: () => m.close() }, 'Close')] });
+  try {
+    const data = await api(`/recurrences/${r.id}/occurrences`, { query: { limit: 50 } });
+    clear(box);
+    if (!data.items.length) box.append(h('p', { class: 'small muted', text: 'Nothing has been created yet.' }));
+    for (const o of data.items) {
+      box.append(h('div', { class: 'item' }, h('strong', { class: 'nowrap', text: fmtDate(o.date) }),
+        o.outcome === 'created' ? badge('done', 'Created') : badge('archived', 'Skipped'),
+        h('span', { class: 'grow small muted', text: o.reason ? String(o.reason).replace(/_/g, ' ') : '' }),
+        o.task ? h('a', { href: '#/t/' + o.task, onclick: () => m.close(), text: o.task }) : null));
+    }
+  } catch (e) { clear(box); box.append(h('p', { class: 'error-text', text: e.message })); }
+}
+function openRecurrenceDialog(project, def, onSaved) {
+  const editing = !!def;
+  const meta = state.meta.recurrence;
+  const f = {
+    title: h('input', { type: 'text', maxlength: 200, required: true, value: editing ? def.title : '', placeholder: 'e.g. Weekly status report {date}' }),
+    description: h('textarea', { maxlength: 20000, value: editing ? def.description : '' }),
+    type: h('select', { value: editing ? def.type : 'task' }, optionList(state.meta.task_types.map((t) => [t, TYPE_LABEL[t]]))),
+    priority: h('select', { value: editing ? def.priority : 'medium' }, optionList(state.meta.priorities.map((p) => [p, PRIORITY_LABEL[p]]))),
+    assignee: h('select', { value: editing && def.assignee ? def.assignee : '' }, optionList(userPairs(project.members, 'Unassigned'))),
+    estimate_hours: h('input', { type: 'number', min: 0, step: '0.25', placeholder: 'hours', value: editing && def.estimate_hours !== null ? def.estimate_hours : '' }),
+    labels: h('input', { type: 'text', placeholder: 'comma separated', value: editing ? def.labels.join(', ') : '' }),
+    due_offset_days: h('input', { type: 'number', min: 0, max: 365, step: 1, value: editing ? def.due_offset_days : 0 }),
+    frequency: h('select', { value: editing ? def.frequency : 'weekly' }, optionList(meta.frequencies.map((x) => [x, FREQUENCY_LABEL[x]]))),
+    interval: h('input', { type: 'number', min: 1, max: 365, step: 1, required: true, value: editing ? def.interval : 1 }),
+    month_day: h('select', { value: editing && def.month_day !== null ? String(def.month_day) : '' },
+      optionList([['', 'Same day as the start date'], ...Array.from({ length: 31 }, (_, i) => [String(i + 1), String(i + 1)]), ['-1', 'Last day of the month']])),
+    start_date: h('input', { type: 'date', required: true, value: editing ? def.start_date : state.today }),
+    end_date: h('input', { type: 'date', value: editing && def.end_date ? def.end_date : '' }),
+    max_occurrences: h('input', { type: 'number', min: 1, max: 1000, step: 1, placeholder: 'no limit', value: editing && def.max_occurrences !== null ? def.max_occurrences : '' }),
+  };
+  const startDay = meta.weekdays[(parseDate(state.today).getDay() + 6) % 7]; // a new weekly rule starts out on today's weekday
+  const days = meta.weekdays.map((d) => [d, h('input', { type: 'checkbox', 'aria-label': WEEKDAY_LABEL[d], checked: editing ? def.weekdays.includes(d) : d === startDay })]);
+  const unit = h('span', { class: 'small muted' });
+  const weekly = h('div', { class: 'row wrap', role: 'group', 'aria-label': 'Days of the week' }, days.map(([d, c]) => h('label', { class: 'row small' }, c, WEEKDAY_LABEL[d])));
+  const monthly = field('Day of the month', f.month_day);
+  const preview = h('p', { class: 'small muted', role: 'status', 'aria-live': 'polite' });
+
+  const schedule = () => {
+    const b = { frequency: f.frequency.value, interval: Number(f.interval.value || 1), start_date: f.start_date.value,
+      end_date: f.end_date.value || null, max_occurrences: f.max_occurrences.value === '' ? null : Number(f.max_occurrences.value) };
+    if (b.frequency === 'weekly') b.weekdays = days.filter(([, c]) => c.checked).map(([d]) => d);
+    if (b.frequency === 'monthly') b.month_day = f.month_day.value === '' ? null : Number(f.month_day.value);
+    return b;
+  };
+  let seq = 0, timer;
+  const refresh = () => {
+    unit.textContent = FREQUENCY_UNIT[f.frequency.value];
+    weekly.classList.toggle('hidden', f.frequency.value !== 'weekly');
+    monthly.classList.toggle('hidden', f.frequency.value !== 'monthly');
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const mine = ++seq;
+      try {
+        const r = await api('/recurrences/preview', { method: 'POST', body: schedule(), query: { count: 5 } });
+        if (mine !== seq) return;
+        preview.classList.remove('error-text');
+        preview.textContent = `${r.schedule}. Next: ${r.dates.length ? r.dates.map(fmtDate).join(', ') : 'no dates'}.`;
+      } catch (e) {
+        if (mine !== seq) return;
+        preview.classList.add('error-text');
+        preview.textContent = e.message;
+      }
+    }, 250);
+  };
+  for (const el of [f.frequency, f.interval, f.month_day, f.start_date, f.end_date, f.max_occurrences, ...days.map(([, c]) => c)]) el.addEventListener('change', refresh);
+  f.interval.addEventListener('input', refresh);
+  refresh();
+
+  const save = h('button', { class: 'btn primary', onclick: () => guarded(save, async () => {
+    if (![f.title, f.interval, f.start_date].every((el) => el.reportValidity())) return;
+    const body = { ...schedule(), title: f.title.value, description: f.description.value, type: f.type.value, priority: f.priority.value,
+      assignee: f.assignee.value || null, estimate_hours: f.estimate_hours.value === '' ? null : Number(f.estimate_hours.value),
+      labels: f.labels.value.split(/[,\s]+/).filter(Boolean), due_offset_days: Number(f.due_offset_days.value || 0) };
+    await api(editing ? '/recurrences/' + def.id : `/projects/${project.key}/recurrences`, { method: editing ? 'PATCH' : 'POST', body });
+    m.close(); toast(editing ? 'Recurring task saved' : 'Recurring task created', 'ok');
+    await onSaved();
+  }) }, editing ? 'Save changes' : 'Create');
+  const m = openModal({ title: editing ? 'Edit recurring task' : 'New recurring task', content: h('div', { class: 'stack' },
+    field('Title', f.title, 'Use {date} to put the date in the title'),
+    h('div', { class: 'form-grid' }, field('Type', f.type), field('Priority', f.priority), field('Assignee', f.assignee), field('Estimate (hours)', f.estimate_hours), field('Labels', f.labels), field('Due after (days)', f.due_offset_days)),
+    field('Description', f.description),
+    h('div', { class: 'cf-heading', text: 'Schedule' }),
+    h('div', { class: 'form-grid' }, field('Repeat', f.frequency), h('label', { class: 'field' }, 'Every', f.interval, unit), field('Starts', f.start_date), field('Ends (optional)', f.end_date), field('Stop after (optional)', f.max_occurrences)),
+    weekly, monthly, preview), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), save] });
 }
 
 /* ============================== create dialogs ============================== */

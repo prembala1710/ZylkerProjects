@@ -8,6 +8,7 @@ import json
 import logging
 import sqlite3
 import sys
+import threading
 from socketserver import ThreadingMixIn
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
@@ -17,7 +18,7 @@ from .config import LOOPBACK_HOSTS, Config
 from .db import connect, init_db
 from .domain import ROLES
 from .errors import ApiError
-from .services import csvio, reports, users
+from .services import csvio, recurrence, reports, users
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -66,6 +67,13 @@ def cmd_serve(args, cfg):
             file=sys.stderr,
         )
     server = make_threaded_server(app, cfg.host, cfg.port)
+    stop = threading.Event()
+    if cfg.recurrence_check_minutes:
+        try:  # catch up straight away: the server may have been down over a due date
+            run_recurrences_once(app)
+        except Exception:  # noqa: BLE001
+            logging.getLogger("zylker.recurrence").exception("recurring task check failed")
+        threading.Thread(target=_recurrence_loop, args=(app, cfg.recurrence_check_minutes, stop), daemon=True).start()
     print("Zylker Projects %s on http://%s:%d  (db: %s, timezone: %s, Cliq: %s)" % (
         __version__, cfg.host, cfg.port, cfg.db_path, cfg.timezone, "on" if cfg.cliq_endpoint else "off"))  # fmt: skip
     try:
@@ -73,6 +81,7 @@ def cmd_serve(args, cfg):
     except KeyboardInterrupt:
         print("\nShutting down.")
     finally:
+        stop.set()
         server.server_close()
     return 0
 
@@ -119,6 +128,35 @@ def cmd_digest(args, cfg):
         app.notifier.flush(10)
         print("\nPosted to Cliq (delivery is best effort; check the channel).")
     return 0
+
+
+def cmd_recur_run(args, cfg):
+    """Create the recurring tasks that are due. Safe to run from cron as often as you like."""
+    init_db(cfg.db_path)
+    app = App(cfg)
+    with app.session() as ctx:
+        report = recurrence.run(ctx, project_key=args.project, dry_run=args.dry_run)
+    app.notifier.flush(10)  # assignment notices are sent in the background; do not exit before they have gone
+    print(json.dumps(report, indent=2))
+    return 0
+
+
+def run_recurrences_once(app):
+    """One pass of the background check used by ``serve``. Returns the number of tasks created."""
+    with app.session() as ctx:
+        report = recurrence.run(ctx)
+    return len(report["created"])
+
+
+def _recurrence_loop(app, minutes, stop):
+    log = logging.getLogger("zylker.recurrence")
+    while not stop.wait(minutes * 60):
+        try:
+            created = run_recurrences_once(app)
+            if created:
+                log.info("created %d recurring task(s)", created)
+        except Exception:  # noqa: BLE001 - a failed pass must never stop the next one
+            log.exception("recurring task check failed")
 
 
 def cmd_backup(args, cfg):
@@ -198,6 +236,11 @@ def build_parser():
     p.add_argument("--project")
     p.add_argument("--post", action="store_true", help="post to the configured Cliq webhook")
     p.set_defaults(fn=cmd_digest)
+
+    p = sub.add_parser("recur-run", help="create the recurring tasks that are due (safe to run from cron)")
+    p.add_argument("--project", help="only this project")
+    p.add_argument("--dry-run", action="store_true", help="show what would be created without creating it")
+    p.set_defaults(fn=cmd_recur_run)
 
     p = sub.add_parser("backup", help="write a consistent copy of the database")
     p.add_argument("path")

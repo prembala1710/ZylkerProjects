@@ -20,7 +20,7 @@ from .domain import (
     TRANSITIONS,
 )
 from .errors import NotFound, ValidationError
-from .services import activity, audit, collab, csvio, deps, milestones, project_fields, projects, reports, taskrefs, tasks, users
+from .services import activity, audit, collab, csvio, deps, milestones, project_fields, projects, recurrence, reports, taskrefs, tasks, users
 from .util import truthy
 
 
@@ -72,6 +72,12 @@ def meta(ctx, req):
         "project_field_limits": project_fields.LIMITS,
         "audit_categories": audit.CATEGORIES,
         "audit_severities": list(audit.SEVERITIES),
+        "recurrence": {
+            "frequencies": list(recurrence.FREQUENCIES),
+            "weekdays": list(recurrence.WEEKDAYS),
+            "max_catch_up": recurrence.MAX_CATCH_UP,
+            "max_per_project": recurrence.MAX_RULES_PER_PROJECT,
+        },
     }
 
 
@@ -353,6 +359,50 @@ def update_milestone(ctx, req, milestone_id):
 def delete_milestone(ctx, req, milestone_id):
     milestones.delete_milestone(ctx, _id(milestone_id, "milestone"))
     return 204, None
+
+
+# ------------------------------------------------------------------- recurring tasks
+
+
+@route("GET", "/api/projects/{key}/recurrences")
+def list_recurrences(ctx, req, key):
+    return {"items": recurrence.list_recurrences(ctx, key)}
+
+
+@route("POST", "/api/projects/{key}/recurrences", role="manager")
+def create_recurrence(ctx, req, key):
+    return 201, recurrence.create_recurrence(ctx, key, req.json())
+
+
+@route("POST", "/api/recurrences/preview", role="manager")
+def preview_recurrence(ctx, req):
+    return recurrence.preview(ctx, req.json(), _int_param(req, "count", 10, 1, 24))
+
+
+@route("POST", "/api/recurrences/run", role="admin")
+def run_recurrences(ctx, req):
+    return recurrence.run(ctx, project_key=req.query.get("project") or None, dry_run=truthy(req.query.get("dry_run", "")))
+
+
+@route("GET", "/api/recurrences/{recurrence_id}")
+def get_recurrence(ctx, req, recurrence_id):
+    return recurrence.get_recurrence(ctx, _id(recurrence_id, "recurrence"))
+
+
+@route("PATCH", "/api/recurrences/{recurrence_id}", role="manager")
+def update_recurrence(ctx, req, recurrence_id):
+    return recurrence.update_recurrence(ctx, _id(recurrence_id, "recurrence"), req.json())
+
+
+@route("DELETE", "/api/recurrences/{recurrence_id}", role="manager")
+def delete_recurrence(ctx, req, recurrence_id):
+    recurrence.delete_recurrence(ctx, _id(recurrence_id, "recurrence"))
+    return 204, None
+
+
+@route("GET", "/api/recurrences/{recurrence_id}/occurrences")
+def recurrence_occurrences(ctx, req, recurrence_id):
+    return {"items": recurrence.occurrences_of(ctx, _id(recurrence_id, "recurrence"), _int_param(req, "limit", 50, 1, 200))}
 
 
 # -------------------------------------------------------------------------- reports

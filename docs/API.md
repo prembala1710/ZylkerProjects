@@ -121,6 +121,7 @@ Every change to data, by the person who made it, with old and new values - plus 
 | Category | Actions | Severity |
 |---|---|---|
 | `task`, `comment`, `time`, `milestone`, `project` | `*.created`, `*.updated`, `*.deleted`, `task.status_changed`, `project.member_added`, ... | info (`project.deleted` is notice) |
+| `recurrence` | `created`, `updated`, `deleted`, `generated`, `skipped` (see [Recurring tasks](#recurring-tasks)) | info (`deleted` and `skipped` are notice) |
 | `project_field` | `created`, `updated`, `deleted` | info (`deleted` is notice) |
 | `user` | `created`, `updated` (role, active, ...), `token_rotated` | notice |
 | `import` | `completed` | notice |
@@ -143,6 +144,44 @@ from `X-Forwarded-For`; with the default of 0 that header is ignored because a c
 **History survives deletion.** Deleting a project or task no longer erases or re-attributes its history (events keep `project` / `task` keys). Earlier
 releases removed a project's history with it, and a task created after a delete could inherit the deleted task's history; the schema upgrade repairs
 existing databases.
+
+## Recurring tasks
+
+A rule is a schedule plus a task template. The generator turns every due date into a real task (see [How tasks are generated](#how-tasks-are-generated)).
+Anyone signed in can read rules; managers create and change them; only admins can trigger the generator by hand.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/projects/{key}/recurrences` | viewer | The project's rules, each with its plain-English `schedule`, `status` (`active`, `paused`, `finished`), `next_dates` (up to 5) and `tasks_created` |
+| `POST /api/projects/{key}/recurrences` | manager | Schedule and template below. At most 50 rules per project |
+| `POST /api/recurrences/preview` | manager | Same schedule fields (`title` optional); `?count=` 1-24, default 10. Returns `{schedule, dates}` and saves nothing |
+| `POST /api/recurrences/run` | admin | Run the generator now. `?project=KEY` limits it, `?dry_run=true` reports what would be created without creating it |
+| `GET /api/recurrences/{recurrence_id}` | viewer | One rule |
+| `PATCH /api/recurrences/{recurrence_id}` | manager | Any subset of the fields, plus `active` (pause / resume) |
+| `DELETE /api/recurrences/{recurrence_id}` | manager | Tasks it already created stay |
+| `GET /api/recurrences/{recurrence_id}/occurrences` | viewer | Every date the generator handled, newest first (`created` or `skipped` with the reason); `?limit=` 1-200 |
+
+*Schedule:* `frequency` (`daily`, `weekly`, `monthly`; required) · `interval` (1-365, default 1: "every 2 weeks") · `weekdays` (`mon`..`sun`; weekly only,
+defaults to the start date's weekday) · `month_day` (1-31, or `-1` for the last day; monthly only, defaults to the start date's day; the 31st means
+"the last day" in shorter months) · `start_date` (required, 2000-2100) · `end_date` · `max_occurrences` (1-1000; whichever of the two comes first ends the rule).
+Weeks are counted from the Monday of the start week. Settings that do not belong to the chosen frequency are dropped. A schedule that can never fire is a 422.
+
+*Template:* `title` (required; `{date}` becomes the occurrence date, e.g. `Report 2026-10-16`) · `description` · `type` · `priority` · `assignee` (an active project
+member) · `estimate_hours` · `labels` · `due_offset_days` (0-365: the task starts on the occurrence date and is due that many days later).
+
+### How tasks are generated
+
+* **Idempotent.** Each date is recorded once; running the generator twice, or two at once, never creates a task twice.
+* **No backfill.** A rule that starts in the past, is resumed after a pause, or has its schedule edited begins producing tasks from today.
+* **No flood.** If the generator was not run for a while, only the latest 5 missed dates become tasks; older ones are recorded as `skipped` (`catch_up_limit`)
+  and an audit event is written.
+* **Archived and completed projects** receive nothing; the dates are kept for later (still subject to the limit of 5) and reported as `kept_for_later`.
+* **Assignee gone** (left the project or deactivated): the task is created unassigned and the occurrence is annotated `assignee_unavailable`.
+* **Reporter:** the person who created the rule, or the project owner if they are no longer active.
+* **One bad date does not stop the rest:** it is recorded as skipped with the reason and the run continues.
+* **When it runs:** `serve` checks when it starts and then every `ZYLKER_RECURRENCE_CHECK_MINUTES`; `zylker-pm recur-run` does the same from cron.
+
+Audit events (category `recurrence`): `created`, `updated`, `deleted` (notice), `generated` (one per task, attached to it) and `skipped` (notice).
 
 ## Tasks
 

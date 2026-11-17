@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Added in schema v2. Shared by fresh databases (SCHEMA) and the v1 -> v2 migration so the two can never drift.
 PROJECT_FIELDS_SCHEMA = """
@@ -76,9 +76,51 @@ CREATE INDEX idx_activity_action ON activity (action, id);
 CREATE INDEX idx_activity_created ON activity (created_at);
 """
 
+# Added in schema v4: recurring tasks. A rule (task_recurrences) describes a schedule and a task template; every
+# date it produces is recorded once in recurrence_occurrences, whose primary key is what makes generation
+# idempotent: running the generator twice, or two generators at once, can never create the same task twice.
+RECURRENCE_SCHEMA = """
+CREATE TABLE task_recurrences (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
+    description TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL DEFAULT 'task' CHECK (type IN ('task','bug','story','epic')),
+    priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('low','medium','high','critical')),
+    assignee_id INTEGER REFERENCES users(id),
+    estimate_hours REAL CHECK (estimate_hours IS NULL OR (estimate_hours >= 0 AND estimate_hours <= 10000)),
+    labels TEXT NOT NULL DEFAULT '[]',
+    due_offset_days INTEGER NOT NULL DEFAULT 0 CHECK (due_offset_days BETWEEN 0 AND 365),
+    frequency TEXT NOT NULL CHECK (frequency IN ('daily','weekly','monthly')),
+    interval_count INTEGER NOT NULL DEFAULT 1 CHECK (interval_count BETWEEN 1 AND 365),
+    weekdays TEXT NOT NULL DEFAULT '[]',
+    month_day INTEGER CHECK (month_day IS NULL OR month_day = -1 OR month_day BETWEEN 1 AND 31),
+    start_date TEXT NOT NULL,
+    end_date TEXT,
+    max_occurrences INTEGER CHECK (max_occurrences IS NULL OR max_occurrences BETWEEN 1 AND 1000),
+    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+    generated_through TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_recurrences_project ON task_recurrences (project_id);
+
+CREATE TABLE recurrence_occurrences (
+    recurrence_id INTEGER NOT NULL REFERENCES task_recurrences(id) ON DELETE CASCADE,
+    occurrence_date TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('created','skipped')),
+    reason TEXT,
+    task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    task_key TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (recurrence_id, occurrence_date)
+);
+"""
+
 # Each entry upgrades a database from version N to N + 1, inside one transaction. A new database is created
 # as version 1 and then walked through every migration, so a fresh install and an upgrade cannot differ.
-MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA}
+MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA}
 
 SCHEMA = """
 CREATE TABLE users (
