@@ -15,13 +15,15 @@ class Context:
     the notifier after the surrounding transaction commits.
     """
 
-    def __init__(self, conn, user, now, tz, config):
+    def __init__(self, conn, user, now, tz, config, request=None):
         self.conn = conn
         self.user = user
         self.now = now
         self.tz = tz
         self.config = config
+        self.request = request  # RequestInfo for web requests; None for the CLI and seeding
         self.events: list[tuple[str, dict]] = []
+        self.audit_events: list[tuple[str, dict]] = []
 
     @property
     def now_iso(self) -> str:
@@ -39,8 +41,21 @@ class Context:
     def actor_name(self) -> str:
         return self.user["display_name"] if self.user is not None else "System"
 
+    @property
+    def ip(self):
+        return self.request.ip if self.request is not None else None
+
+    @property
+    def request_id(self):
+        return self.request.id if self.request is not None else None
+
     def emit(self, event: str, **payload) -> None:
         self.events.append((event, payload))
+
+    def audit(self, action: str, **details) -> None:
+        """Queue an audit event that is written *after* the request commits (for events the request itself
+        does not change data for, such as a CSV export on a read-only GET). Dropped if the request fails."""
+        self.audit_events.append((action, details))
 
     def require_role(self, role: str) -> None:
         if self.user is None:

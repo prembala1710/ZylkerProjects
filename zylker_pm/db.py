@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Added in schema v2. Shared by fresh databases (SCHEMA) and the v1 -> v2 migration so the two can never drift.
 PROJECT_FIELDS_SCHEMA = """
@@ -36,8 +36,49 @@ CREATE TABLE project_field_values (
 CREATE INDEX idx_pfv_field ON project_field_values (field_id);
 """
 
-# Each entry upgrades a database from version N to N + 1, inside one transaction.
-MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA}
+# Added in schema v3: the audit log grows up.
+#  - The activity table loses its ON DELETE CASCADE to projects. Deleting a project used to erase that
+#    project's whole history, which is exactly what an audit trail must not allow. `project_key` keeps the
+#    history readable after the project is gone.
+#  - `ip` and `request_id` tie an event to the request that caused it.
+#  - Indexes for the admin log monitor's filters.
+#  - Rows whose task_id no longer points at the task they were written for (SQLite reuses the highest row id
+#    after a delete) are detached: the task_key stays, so nothing is lost, but a new task no longer inherits
+#    a deleted task's history.
+AUDIT_SCHEMA = """
+CREATE TABLE activity_v3 (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER,
+    project_key TEXT,
+    task_id INTEGER,
+    task_key TEXT,
+    actor_id INTEGER REFERENCES users(id),
+    action TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    ip TEXT,
+    request_id TEXT
+);
+INSERT INTO activity_v3 (id, project_id, project_key, task_id, task_key, actor_id, action, details, created_at)
+SELECT a.id, a.project_id, p.key,
+       CASE WHEN a.task_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM tasks t JOIN projects tp ON tp.id = t.project_id
+                WHERE t.id = a.task_id AND tp.key || '-' || t.number = a.task_key)
+            THEN a.task_id END,
+       a.task_key, a.actor_id, a.action, a.details, a.created_at
+FROM activity a LEFT JOIN projects p ON p.id = a.project_id;
+DROP TABLE activity;
+ALTER TABLE activity_v3 RENAME TO activity;
+CREATE INDEX idx_activity_project ON activity (project_id, id);
+CREATE INDEX idx_activity_task ON activity (task_id, id);
+CREATE INDEX idx_activity_actor ON activity (actor_id, id);
+CREATE INDEX idx_activity_action ON activity (action, id);
+CREATE INDEX idx_activity_created ON activity (created_at);
+"""
+
+# Each entry upgrades a database from version N to N + 1, inside one transaction. A new database is created
+# as version 1 and then walked through every migration, so a fresh install and an upgrade cannot differ.
+MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA}
 
 SCHEMA = """
 CREATE TABLE users (
@@ -163,7 +204,7 @@ CREATE TABLE activity (
 );
 CREATE INDEX idx_activity_project ON activity (project_id, id);
 CREATE INDEX idx_activity_task ON activity (task_id, id);
-""" + PROJECT_FIELDS_SCHEMA
+"""
 
 
 def connect(path: str) -> sqlite3.Connection:
@@ -183,17 +224,17 @@ def init_db(path: str) -> None:
     conn = connect(path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version == 0:
-            conn.executescript(SCHEMA)
-            conn.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
-        elif version > SCHEMA_VERSION:
+        if version > SCHEMA_VERSION:
             raise RuntimeError(
                 "Database schema v%d is newer than this application (v%d)" % (version, SCHEMA_VERSION)
             )
-        else:
-            while version < SCHEMA_VERSION:
-                _migrate(conn, version)
-                version += 1
+        if version == 0:
+            conn.executescript(SCHEMA)
+            conn.execute("PRAGMA user_version = 1")
+            version = 1
+        while version < SCHEMA_VERSION:
+            _migrate(conn, version)
+            version += 1
     finally:
         conn.close()
 
