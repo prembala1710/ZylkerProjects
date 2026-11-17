@@ -36,6 +36,7 @@ class Config:
     max_body_bytes: int = 1_000_000
     max_import_bytes: int = 5_000_000
     default_task_hours: float = 8.0  # duration assumed for unestimated tasks in critical path
+    recurrence_check_minutes: int = 15  # how often `serve` looks for recurring tasks that are due (0 = never)
     proxy_hops: int = 0  # trusted reverse proxies in front of the app; decides which client address the audit log records
 
     @classmethod
@@ -53,6 +54,10 @@ class Config:
             proxy_hops = int(get("PROXY_HOPS", "0"))
         except ValueError:
             raise ValueError("ZYLKER_PROXY_HOPS must be an integer") from None
+        try:
+            recurrence_check_minutes = int(get("RECURRENCE_CHECK_MINUTES", "15"))
+        except ValueError:
+            raise ValueError("ZYLKER_RECURRENCE_CHECK_MINUTES must be an integer") from None
         cfg = cls(
             db_path=get("DB", "zylker.db"),
             host=get("HOST", "127.0.0.1"),
@@ -62,6 +67,7 @@ class Config:
             cliq_endpoint=get("CLIQ_ENDPOINT"),
             cliq_bot_unique_name=get("CLIQ_BOT_UNIQUE_NAME"),
             proxy_hops=proxy_hops,
+            recurrence_check_minutes=recurrence_check_minutes,
         )
         cfg.validate()
         return cfg
@@ -70,6 +76,8 @@ class Config:
         get_tz(self.timezone)
         if not 0 <= self.proxy_hops <= 5:
             raise ValueError("ZYLKER_PROXY_HOPS must be between 0 and 5")
+        if not 0 <= self.recurrence_check_minutes <= 1440:
+            raise ValueError("ZYLKER_RECURRENCE_CHECK_MINUTES must be between 0 and 1440")
         if self.cliq_endpoint:
             parsed = urlparse(self.cliq_endpoint)
             local = parsed.hostname in LOOPBACK_HOSTS
