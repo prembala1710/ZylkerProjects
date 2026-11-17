@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import ipaddress
 import re
 
 from . import __version__
@@ -139,6 +140,27 @@ def audit_export(ctx, req):
     if truncated:
         headers.append(("X-Export-Truncated", "true"))
     return Raw(text.encode("utf-8-sig"), "text/csv; charset=utf-8", headers=headers)
+
+
+# --------------------------------------------------------------------- security
+
+
+@route("GET", "/api/security/blocks", role="admin")
+def security_blocks(ctx, req):
+    return {"settings": ctx.throttle.settings(), "blocked": ctx.throttle.blocked(ctx.now.timestamp())}
+
+
+@route("DELETE", "/api/security/blocks", role="admin")
+def security_unblock(ctx, req):
+    ip = (req.query.get("ip") or "").strip() or None
+    if ip is not None:
+        try:
+            ip = str(ipaddress.ip_address(ip))
+        except ValueError:
+            raise ValidationError({"ip": "must be an IPv4 or IPv6 address"}) from None
+    removed = ctx.throttle.unblock(ip)
+    ctx.audit("auth.unblocked", ip=ip or "all", removed=removed)
+    return {"removed": removed}
 
 
 # ------------------------------------------------------------------------- projects

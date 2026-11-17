@@ -26,6 +26,8 @@ standard library alone - **no packages to install, no build step** - and stores 
   per project (see [Custom project fields](#custom-project-fields)).
 - **Admin audit log** - one screen for administrators showing every change plus failed sign-ins, permission denials, exports and server
   errors, with filters, a live view and CSV export (see [Audit log](#audit-log)).
+- **Brute-force protection and rate limits** - failed sign-ins block the address with growing waits, and each user has a request budget; both
+  answer `429` with `Retry-After` (see [Throttling](#throttling)).
 - **Recurring tasks** - "every other Monday", "the last day of each month": managers define a schedule and a task template, the system creates the
   tasks on time without ever duplicating or flooding (see [Recurring tasks](#recurring-tasks)).
 
@@ -71,6 +73,8 @@ All settings are environment variables; nothing is read from the repository.
 | `ZYLKER_CLIQ_ENDPOINT` | *(empty = notifications off)* | A Cliq **incoming webhook URL**. It contains a key - treat it as a secret. Must be `https` (plain `http` only for localhost) |
 | `ZYLKER_CLIQ_BOT_UNIQUE_NAME` | *(empty)* | Post as this bot (appended as `bot_unique_name`, the same convention as the repository's GitHub Informer workflow) |
 | `ZYLKER_PROXY_HOPS` | `0` | How many reverse proxies you trust in front of the app (0-5). It decides which client address the [audit log](#audit-log) records: with `0` the connection's address is used and `X-Forwarded-For` is ignored (a client can forge it); with `1` the last entry of `X-Forwarded-For` is used, with `2` the second from the right, and so on |
+| `ZYLKER_AUTH_FAILURE_LIMIT` | `10` | Failed sign-ins from one address within five minutes before it is blocked (0-1000; `0` turns the protection off) |
+| `ZYLKER_RATE_LIMIT_PER_MINUTE` | `600` | Sustained requests per user per minute (0-100000; `0` turns the limit off) |
 | `ZYLKER_RECURRENCE_CHECK_MINUTES` | `15` | How often `serve` looks for recurring tasks that are due (0-1440; `0` turns the check off and leaves it to `zylker-pm recur-run`) |
 
 ## Custom project fields
@@ -125,6 +129,20 @@ Administrators get one place to see **everything that happens**: *Admin -> Audit
 
 Behind a reverse proxy, set `ZYLKER_PROXY_HOPS` so the log records the real client rather than the proxy.
 This is a record for people to read, not an alerting system, and it does not throttle: do that at the proxy.
+
+## Throttling
+
+The server defends itself against guessing and runaway clients; nothing needs configuring.
+
+- **Guessing tokens.** Tokens are 256 random bits, so guessing is hopeless, but hammering is still noise and load. Ten failed sign-ins from one address
+  in five minutes block that address for a minute; each repeat doubles the wait (up to an hour). Requests with a **valid** token are still served from a
+  blocked address, so a shared office address is not locked out by one person's typo.
+- **Runaway clients.** Each user has a budget of 600 requests a minute (with a burst of 120). Past it they get `429` and a `Retry-After`; responses carry
+  `X-RateLimit-Limit` and `X-RateLimit-Remaining`. The page itself and `GET /api/health` are never limited.
+- **Visible.** Blocks and refusals appear in the [audit log](#audit-log) (`auth.throttled`, warnings, with repeats merged), the audit summary counts them, and
+  admins can list or lift blocks with `GET` / `DELETE /api/security/blocks`.
+- **Honest limits.** State is in memory and per process (a restart clears it; several processes each count on their own). Behind a reverse proxy set
+  `ZYLKER_PROXY_HOPS`, otherwise every client looks like the proxy. This is a safety net, not a firewall: keep throttling at the proxy too if the app is exposed.
 
 ## Recurring tasks
 
@@ -270,13 +288,12 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
   no inline scripts or styles, no external resources, no framing - so stored text cannot become markup. A browser test submits
   `<script>`/`<img onerror>` payloads in titles, descriptions, comments and project names and checks that none executes.
 - Static files are served from a fixed whitelist of three paths; there is no filesystem lookup from the URL.
-- **Not covered:** single sign-on (Zoho or otherwise), token expiry, failed-login throttling (tokens are unguessable, and failed sign-ins are
-  now recorded and visible in the audit log, but throttle at the proxy anyway), e-mail notifications, per-project read restrictions (every signed-in user can read every project), file attachments.
+- **Not covered:** single sign-on (Zoho or otherwise), token expiry, failed-login throttling beyond the per-process limits described under [Throttling](#throttling) (keep throttling at the proxy too), e-mail notifications, per-project read restrictions (every signed-in user can read every project), file attachments.
 
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~330 tests, no dependencies
+python -m unittest discover -s tests -v     # ~370 tests, no dependencies
 pip install playwright && playwright install chromium
 python -m unittest discover -s tests -p "test_ui_*.py" -v   # 38 real-browser tests (skipped automatically without Playwright)
 ```

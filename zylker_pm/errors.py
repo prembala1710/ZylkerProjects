@@ -59,6 +59,13 @@ class PayloadTooLarge(ApiError):
     code = "payload_too_large"
 
 
+class TooManyRequests(ApiError):
+    """Throttled: too many failed sign-ins from one address, or a user over their request budget. Carries Retry-After."""
+
+    status = 429
+    code = "too_many_requests"
+
+
 class UnsupportedMediaType(ApiError):
     status = 415
     code = "unsupported_media_type"

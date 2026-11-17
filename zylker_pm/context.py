@@ -15,13 +15,14 @@ class Context:
     the notifier after the surrounding transaction commits.
     """
 
-    def __init__(self, conn, user, now, tz, config, request=None):
+    def __init__(self, conn, user, now, tz, config, request=None, throttle=None):
         self.conn = conn
         self.user = user
         self.now = now
         self.tz = tz
         self.config = config
         self.request = request  # RequestInfo for web requests; None for the CLI and seeding
+        self.throttle = throttle  # the app's Throttle for web requests (the security endpoints use it); None elsewhere
         self.events: list[tuple[str, dict]] = []
         self.audit_events: list[tuple[str, dict]] = []
 
