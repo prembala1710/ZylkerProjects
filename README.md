@@ -24,6 +24,8 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **CSV import / export** - bring in a Jira-style export (with a dry run) or take your data out.
 - **Custom project fields** - admins define extra text, number and URL fields (a client, a budget, a wiki link); managers fill them in
   per project (see [Custom project fields](#custom-project-fields)).
+- **Admin audit log** - one screen for administrators showing every change plus failed sign-ins, permission denials, exports and server
+  errors, with filters, a live view and CSV export (see [Audit log](#audit-log)).
 
 ## Quick start
 
@@ -65,6 +67,7 @@ All settings are environment variables; nothing is read from the repository.
 | `ZYLKER_PUBLIC_URL` | *(empty)* | Public base URL (`https://pm.example.com`); makes task keys in Cliq messages clickable |
 | `ZYLKER_CLIQ_ENDPOINT` | *(empty = notifications off)* | A Cliq **incoming webhook URL**. It contains a key - treat it as a secret. Must be `https` (plain `http` only for localhost) |
 | `ZYLKER_CLIQ_BOT_UNIQUE_NAME` | *(empty)* | Post as this bot (appended as `bot_unique_name`, the same convention as the repository's GitHub Informer workflow) |
+| `ZYLKER_PROXY_HOPS` | `0` | How many reverse proxies you trust in front of the app (0-5). It decides which client address the [audit log](#audit-log) records: with `0` the connection's address is used and `X-Forwarded-For` is ignored (a client can forge it); with `1` the last entry of `X-Forwarded-For` is used, with `2` the second from the right, and so on |
 
 ## Custom project fields
 
@@ -93,6 +96,32 @@ and shown in the project header. At most 20 fields.
 Databases created by an earlier release are upgraded automatically the first time they are opened (schema v1 to v2, in one transaction;
 a failed upgrade changes nothing).
 
+## Audit log
+
+Administrators get one place to see **everything that happens**: *Admin -> Audit log* in the UI, `GET /api/audit` for scripts.
+
+- **What is recorded.** Every change to data (who, what, when, old and new values) plus the events that are not data changes but matter to an
+  administrator: **failed sign-ins**, **permission denials**, **sessions starting**, **data exports** (task CSV and the audit log itself) and
+  **server errors**. Routine reads are deliberately not recorded; they would bury the events that matter. The full list is in
+  [docs/API.md](docs/API.md#audit-log).
+- **What the screen gives you.** Counts for the period, a per-day chart, the busiest people and the addresses with the most failed sign-ins;
+  filters for text, category, severity, person, project, address and dates; click any event for its request id, address and raw details; a
+  **Live** switch that adds new events as they happen; and **Export CSV** of whatever the filters show.
+- **Following one request.** Every response carries an `X-Request-Id` header. The same id is in the access log and in the audit log, and
+  a 500 error body quotes it, so "something broke at 10:42" becomes one search.
+- **Safe by construction.** The log never stores a token, request body, password or exception message. Text that comes from a client
+  (user-agent, path) is stripped of control characters and truncated, so it cannot forge log lines, and the UI shows it as text.
+- **A flood cannot fill the disk.** Repeats of the same failed sign-in, denial or error from the same address within five minutes update one
+  row (`count`) instead of adding another.
+- **It cannot get in the way.** Audit writes happen after the request's own transaction, on their own short connection; if one fails, the request
+  still succeeds and a warning is logged.
+- **History is not erased.** Deleting a project or a task keeps its history (events keep their `project` / `task` keys). Earlier releases
+  deleted a project's history with it, and a task created after a delete could inherit the deleted task's history; the automatic schema
+  upgrade repairs existing databases.
+
+Behind a reverse proxy, set `ZYLKER_PROXY_HOPS` so the log records the real client rather than the proxy.
+This is a record for people to read, not an alerting system, and it does not throttle: do that at the proxy.
+
 ## Roles
 
 | Role | Can |
@@ -100,7 +129,7 @@ a failed upgrade changes nothing).
 | **viewer** | Read everything: projects, tasks, reports, exports |
 | **member** | Viewer + create/edit tasks, comment, log time and link dependencies **in projects they belong to** |
 | **manager** | Member + everything in *any* project: create and edit projects, manage members and milestones, delete tasks, import CSV, see everyone's timesheet |
-| **admin** | Manager + manage users and roles, define custom project fields, delete projects, read the global audit trail |
+| **admin** | Manager + manage users and roles, define custom project fields, delete projects, read the audit log |
 
 Project membership also controls who can be *assigned* work. Archived projects are read-only for all roles.
 The server is the authority: the UI hides controls a role cannot use, but every rule is enforced in the API.
@@ -202,7 +231,9 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
   speaks plain HTTP, sends no HSTS header, and has no CORS (same-origin only). It is also a standard WSGI callable
   (`zylker_pm.app.App`) if you prefer gunicorn or waitress.
 - **Scale:** SQLite in WAL mode with one writer at a time suits a team or department on a single host. It has **not** been load-tested.
-- **Upgrades:** the schema version is stored in the database; a database newer than the code is refused rather than modified.
+- **Upgrades:** the schema version is stored in the database and older databases are upgraded automatically, one all-or-nothing step at a
+  time; a database newer than the code is refused rather than modified. Take a `backup` first if the data matters. The audit log table can
+  grow large over years; there is no pruning command, deliberately, because deleting an audit trail should be a conscious decision.
 
 ## Security notes
 
@@ -215,15 +246,15 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
   no inline scripts or styles, no external resources, no framing - so stored text cannot become markup. A browser test submits
   `<script>`/`<img onerror>` payloads in titles, descriptions, comments and project names and checks that none executes.
 - Static files are served from a fixed whitelist of three paths; there is no filesystem lookup from the URL.
-- **Not covered:** single sign-on (Zoho or otherwise), token expiry, failed-login throttling (tokens are unguessable, but throttle at
-  the proxy anyway), e-mail notifications, per-project read restrictions (every signed-in user can read every project), file attachments.
+- **Not covered:** single sign-on (Zoho or otherwise), token expiry, failed-login throttling (tokens are unguessable, and failed sign-ins are
+  now recorded and visible in the audit log, but throttle at the proxy anyway), e-mail notifications, per-project read restrictions (every signed-in user can read every project), file attachments.
 
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~230 tests, no dependencies
+python -m unittest discover -s tests -v     # ~280 tests, no dependencies
 pip install playwright && playwright install chromium
-python -m unittest tests.test_ui_e2e -v      # 25 real-browser tests (skipped automatically without Playwright)
+python -m unittest tests.test_ui_e2e -v      # 33 real-browser tests (skipped automatically without Playwright)
 ```
 
 The backend tests include hand-computed expectations for the critical path, workload, burndown and health rules, deadlock
@@ -242,7 +273,7 @@ tests/                 unit, HTTP, CLI and browser tests
 ## Limitations and ideas for later
 
 Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), recurring tasks, task templates or
-attachments; custom project fields cannot be reordered or filtered on yet; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+attachments; custom project fields cannot be reordered or filtered on yet; the audit log has no retention policy or alerting; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
