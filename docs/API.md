@@ -18,6 +18,7 @@ Errors always look like `{"error": {"code": "...", "message": "...", "details": 
 | 409 | A business rule blocked the change (`invalid_transition`, `blocked_by_open_tasks`, `open_subtasks`, `dependency_cycle`, `project_archived`, ...) |
 | 413 / 415 | Body too large / wrong content type |
 | 422 | Field validation failed - `details` maps each field to its problem |
+| 429 | Throttled: too many failed sign-ins from this address (`too_many_failures`) or the user's request budget is used up (`rate_limited`). `Retry-After` says how many seconds to wait |
 | 500 | Unexpected server error. The body carries a `request_id` to quote to an administrator |
 
 Every response has an `X-Request-Id` header. A valid one sent by a reverse proxy (6-64 letters, digits, `.` `_` `-`) is kept, otherwise one is generated.
@@ -125,7 +126,7 @@ Every change to data, by the person who made it, with old and new values - plus 
 | `project_field` | `created`, `updated`, `deleted` | info (`deleted` is notice) |
 | `user` | `created`, `updated` (role, active, ...), `token_rotated` | notice |
 | `import` | `completed` | notice |
-| `auth` | `failed` (missing or invalid token), `denied` (role too low, not a project member), `session_started` | warning, warning, info |
+| `auth` | `failed` (missing or invalid token), `denied` (role too low, not a project member), `session_started`, `throttled`, `unblocked` (see [Rate limiting](#rate-limiting-and-brute-force-protection)) | warning, warning, info, warning, notice |
 | `data` | `exported` (task CSV export, with row count) | notice |
 | `audit` | `exported` (the audit log itself) | notice |
 | `system` | `error` (unhandled exception: route and exception *type* only) | error |
@@ -182,6 +183,30 @@ member) · `estimate_hours` · `labels` · `due_offset_days` (0-365: the task st
 * **When it runs:** `serve` checks when it starts and then every `ZYLKER_RECURRENCE_CHECK_MINUTES`; `zylker-pm recur-run` does the same from cron.
 
 Audit events (category `recurrence`): `created`, `updated`, `deleted` (notice), `generated` (one per task, attached to it) and `skipped` (notice).
+
+## Rate limiting and brute-force protection
+
+Two limits protect the server; both can be tuned or switched off with environment variables (see the README). Every throttled answer is `429` with a
+`Retry-After` header (seconds) and `details: {scope, retry_after}`; `GET /api/health` and the web page are never limited.
+
+* **Failed sign-ins per address** (`ZYLKER_AUTH_FAILURE_LIMIT`, default 10 within five minutes). The failure that reaches the limit is still answered `401`;
+  the address is then blocked for 60 seconds, and each repeat doubles the time (2, 4, 8 ... up to an hour; an address that stays quiet for an hour starts
+  again at 60 seconds). While blocked, requests that fail to authenticate get `429 too_many_failures` and do **not** extend the block. Requests with a
+  *valid* token are still served, so a shared office address is not locked out by one person's typo. A missing token counts as a failure.
+* **Request budget per user** (`ZYLKER_RATE_LIMIT_PER_MINUTE`, default 600). A token bucket: the sustained rate, with a burst of a fifth of it (at least 10,
+  never more than the rate itself). Each authenticated request costs one - including ones refused with 403 - and carries `X-RateLimit-Limit` (the per-minute
+  rate) and `X-RateLimit-Remaining` (requests left in the bucket). When it is empty the answer is `429 rate_limited` and nothing is executed.
+
+The address used is the connection's (or, behind trusted proxies, the client's: see `ZYLKER_PROXY_HOPS`). State is kept in memory, per server process,
+and is bounded (at most 10,000 tracked entries); it is lost on restart.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/security/blocks` | admin | `{settings, blocked: [{ip, retry_after, blocked_until, blocked_since, strikes}]}` - the active blocks, longest first |
+| `DELETE /api/security/blocks` | admin | Lift one block with `?ip=`, or all of them without it; also forgets the address's history. Returns `{removed}` |
+
+Audit events (category `auth`): `throttled` (warning) with `reason` `blocked` (a block starts: seconds, strikes, failures), `still_blocked` or `rate_limited`
+(repeats merged, with a `count`), and `unblocked` (notice). The audit summary reports `security.throttled`.
 
 ## Tasks
 
