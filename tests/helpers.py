@@ -49,7 +49,7 @@ class Client:
     def __init__(self, app, token=None):
         self.app, self.token = app, token
 
-    def request(self, method, path, body=None, *, query=None, raw=None, content_type=None, headers=None, token=...):
+    def request(self, method, path, body=None, *, query=None, raw=None, content_type=None, headers=None, token=..., remote_addr="203.0.113.7"):
         if raw is None and body is not None:
             raw, content_type = json.dumps(body).encode("utf-8"), content_type or "application/json"
         raw = raw or b""
@@ -59,6 +59,7 @@ class Client:
             "QUERY_STRING": urlencode(query or {}),
             "SERVER_NAME": "test",
             "SERVER_PORT": "80",
+            "REMOTE_ADDR": remote_addr,  # a documentation-range address, as a real client would show up
             "wsgi.url_scheme": "http",
             "wsgi.input": io.BytesIO(raw),
             "CONTENT_LENGTH": str(len(raw)),
