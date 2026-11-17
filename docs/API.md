@@ -18,6 +18,10 @@ Errors always look like `{"error": {"code": "...", "message": "...", "details": 
 | 409 | A business rule blocked the change (`invalid_transition`, `blocked_by_open_tasks`, `open_subtasks`, `dependency_cycle`, `project_archived`, ...) |
 | 413 / 415 | Body too large / wrong content type |
 | 422 | Field validation failed - `details` maps each field to its problem |
+| 500 | Unexpected server error. The body carries a `request_id` to quote to an administrator |
+
+Every response has an `X-Request-Id` header. A valid one sent by a reverse proxy (6-64 letters, digits, `.` `_` `-`) is kept, otherwise one is generated.
+The same id is written to the access log and to the audit log, so one request can be followed everywhere.
 
 Collections are returned as `{"items": [...]}`; `GET /api/tasks` also returns `total`, `limit`, `offset`.
 Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric id or username.
@@ -38,7 +42,7 @@ Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric
 | `POST /api/users` | admin | `{username, display_name, email?, role?, weekly_capacity_hours?}` - the response contains the API token, **once** |
 | `PATCH /api/users/{user_id}` | viewer | Admins: any field (`role`, `active`, `weekly_capacity_hours`, ...). Everyone else: only their own `display_name` / `email`. The last active admin cannot be demoted or deactivated |
 | `POST /api/users/{user_id}/rotate-token` | viewer | Admins for anyone, others for themselves. Invalidates the old token immediately |
-| `GET /api/activity` | admin | Global audit trail (user/role changes, token rotations); `?limit=&before=` |
+| `GET /api/activity` | admin | The raw global activity feed; `?limit=&before=`. Superseded by [`GET /api/audit`](#audit-log), which adds filters, search and security events |
 
 ## Projects
 
@@ -92,6 +96,53 @@ when a field was made required are left alone until someone edits that field, so
 Every problem is reported at once, keyed `custom_fields.<field_key>` in the 422 `details`. Changes to values appear in the project's
 activity feed as `custom_fields.<field_key>: old -> new`; changes to definitions appear in the admin audit trail
 (`project_field.created`, `.updated`, `.deleted`).
+
+## Audit log
+
+The admin log monitor. All three endpoints are admin-only; the same data is in the UI under **Admin -> Audit log**.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/audit` | admin | Events, newest first. Filters below. `?limit=` (1-200, default 50), `?before=<id>` pages back, `?after=<id>` returns what is newer (used by the live view; `gap: true` means more arrived than fit, so reload) |
+| `GET /api/audit/summary` | admin | `?days=1..90` (default 7): events per day (in the server's timezone), by category and severity, most active people, failed sign-ins, denials, errors and the addresses with the most failures |
+| `GET /api/audit/export.csv` | admin | The events matching the same filters as a CSV (UTF-8 with BOM, up to 50,000 rows; `X-Export-Truncated: true` if cut). Spreadsheet formulas are neutralised. The export is itself recorded |
+
+Filters (all optional, combinable, validated - an unknown value is a 422, never ignored): `q` (searches action, actor, project, task, address,
+request id and the event's details) · `actor=<username>|system` · `category=a,b` · `action=task.created,...` · `severity=a,b` ·
+`project=<KEY>` (also finds the history of a deleted project) · `ip=` · `request_id=` · `from=` / `to=` (`YYYY-MM-DD`, inclusive, in the server's timezone).
+
+Each event: `id`, `action`, `category`, `severity`, `actor` (`null` for the CLI and system), `project`, `task`, `details`, `ip`, `request_id`, `created_at`.
+The first page also returns `total` (exact up to 10,000, then `total_capped: true`).
+
+### What is recorded
+
+Every change to data, by the person who made it, with old and new values - plus the events that are not data changes but that an administrator needs:
+
+| Category | Actions | Severity |
+|---|---|---|
+| `task`, `comment`, `time`, `milestone`, `project` | `*.created`, `*.updated`, `*.deleted`, `task.status_changed`, `project.member_added`, ... | info (`project.deleted` is notice) |
+| `project_field` | `created`, `updated`, `deleted` | info (`deleted` is notice) |
+| `user` | `created`, `updated` (role, active, ...), `token_rotated` | notice |
+| `import` | `completed` | notice |
+| `auth` | `failed` (missing or invalid token), `denied` (role too low, not a project member), `session_started` | warning, warning, info |
+| `data` | `exported` (task CSV export, with row count) | notice |
+| `audit` | `exported` (the audit log itself) | notice |
+| `system` | `error` (unhandled exception: route and exception *type* only) | error |
+
+Routine reads are **not** recorded; they would bury the events that matter. Nothing in the log is a token, a request body, a password or an exception
+message. User-agent and path text is stripped of control characters and truncated.
+
+**Repeats are merged.** The same `auth.failed`, `auth.denied` or `system.error` from the same actor and address within five minutes updates one row
+(`details.count`, `details.last_seen`) instead of adding another, so a flood of bad requests cannot grow the log without bound and the count still says how bad it was.
+
+**Sessions.** The first authenticated request of a user after 30 quiet minutes records `auth.session_started` with the client's user-agent.
+
+**Addresses.** `ip` is the connection's address. Behind a reverse proxy set `ZYLKER_PROXY_HOPS` to the number of proxies so the real client is taken
+from `X-Forwarded-For`; with the default of 0 that header is ignored because a client can forge it.
+
+**History survives deletion.** Deleting a project or task no longer erases or re-attributes its history (events keep `project` / `task` keys). Earlier
+releases removed a project's history with it, and a task created after a delete could inherit the deleted task's history; the schema upgrade repairs
+existing databases.
 
 ## Tasks
 
