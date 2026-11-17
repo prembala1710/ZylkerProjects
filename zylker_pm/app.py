@@ -26,9 +26,12 @@ from .errors import (
     MethodNotAllowed,
     NotFound,
     PayloadTooLarge,
+    TooManyRequests,
+    Unauthorized,
     UnsupportedMediaType,
 )
 from .services import audit
+from .throttle import Throttle
 from .util import iso
 
 log = logging.getLogger("zylker.access")
@@ -59,7 +62,7 @@ SECURITY_HEADERS = [
 STATUS_TEXT = {
     200: "OK", 201: "Created", 204: "No Content", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
     404: "Not Found", 405: "Method Not Allowed", 409: "Conflict", 413: "Payload Too Large",
-    415: "Unsupported Media Type", 422: "Unprocessable Entity", 500: "Internal Server Error",
+    415: "Unsupported Media Type", 422: "Unprocessable Entity", 429: "Too Many Requests", 500: "Internal Server Error",
 }  # fmt: skip
 
 
@@ -114,6 +117,7 @@ class RequestInfo:
         self.user_agent = audit.clean(environ.get("HTTP_USER_AGENT"), 200)
         self.had_token = auth.bearer_token(environ.get("HTTP_AUTHORIZATION")) is not None
         self.user = None  # set once the token has been verified
+        self.rate = None  # (limit, remaining) once the user's request budget has been charged
         self.route = None  # the route pattern, e.g. /api/tasks/{key}: bounded, unlike the raw path
 
 
@@ -194,6 +198,7 @@ class App:
         self.tz = get_tz(config.timezone)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.notifier = notifier if notifier is not None else notify.build_notifier(config)
+        self.throttle = Throttle(config.auth_failure_limit, config.rate_limit_per_minute)
         self._seen = {}  # user id -> when we last recorded that user's session; keeps the hot path free of DB writes
         self._seen_lock = threading.Lock()
 
@@ -238,12 +243,24 @@ class App:
                 details={"reason": "invalid_token" if info.had_token else "missing_token", "method": info.method, "path": audit.clean(info.path), "user_agent": info.user_agent},
                 merge_on=("reason",),
             )  # fmt: skip
+        elif exc.status == 429:
+            self._audit_throttle(info, exc)
         elif exc.status == 403:
             self._audit_write(
                 "auth.denied", info, actor_id=info.user["id"] if info.user is not None else None,
                 details={"code": exc.code, "method": info.method, "route": info.route or audit.clean(info.path), "message": audit.clean(exc.message)},
                 merge_on=("code", "route"),
             )  # fmt: skip
+
+    def _audit_throttle(self, info, exc):
+        self._audit_write(
+            "auth.throttled", info, actor_id=info.user["id"] if info.user is not None else None,
+            details={
+                "scope": exc.details["scope"], "reason": "still_blocked" if exc.code == "too_many_failures" else "rate_limited",
+                "method": info.method, "route": info.route or audit.clean(info.path),
+            },
+            merge_on=("scope", "reason"),
+        )  # fmt: skip
 
     def _audit_crash(self, info, exc):
         self._audit_write(
@@ -268,6 +285,35 @@ class App:
             self._seen[user["id"]] = now
         self._audit_write("auth.session_started", info, actor_id=user["id"], details={"user_agent": info.user_agent})
 
+    # -- throttling --------------------------------------------------------------------
+
+    def _on_auth_failure(self, info):
+        """Called when a request fails to authenticate. Raises 429 while the address is blocked; the failure that
+        starts a block is still answered with the honest 401 (and gets its own audit event)."""
+        verdict = self.throttle.on_failure(info.ip, self.clock().timestamp())
+        if verdict.outcome == "blocked":
+            wait = verdict.retry_after
+            raise TooManyRequests(
+                "Too many failed sign-in attempts from this address. Try again in %d seconds." % wait,
+                code="too_many_failures", details={"scope": "ip", "retry_after": wait}, headers={"Retry-After": str(wait)},
+            )  # fmt: skip
+        if verdict.outcome == "blocked_now":
+            self._audit_write(
+                "auth.throttled", info,
+                details={"scope": "ip", "reason": "blocked", "seconds": verdict.retry_after, "strikes": verdict.strikes, "failures": verdict.failures},
+            )  # fmt: skip
+
+    def _charge_request(self, info, user):
+        allowed, wait, limit, remaining = self.throttle.take(user["id"], self.clock().timestamp())
+        if not limit:
+            return
+        info.rate = (limit, remaining)
+        if not allowed:
+            raise TooManyRequests(
+                "Request limit reached (%d per minute). Try again in %d seconds." % (limit, wait),
+                code="rate_limited", details={"scope": "user", "retry_after": wait}, headers={"Retry-After": str(wait)},
+            )  # fmt: skip
+
     # -- WSGI --------------------------------------------------------------------------
 
     def __call__(self, environ, start_response):
@@ -287,6 +333,8 @@ class App:
             )
         if method == "HEAD":
             body = b""
+        if info.rate is not None:
+            headers = headers + [("X-RateLimit-Limit", str(info.rate[0])), ("X-RateLimit-Remaining", str(info.rate[1]))]
         headers = headers + SECURITY_HEADERS + [("X-Request-Id", info.id), ("Content-Length", str(len(body)))]
         log.info("%s %s -> %d (%.0f ms) [%s]", _loggable(method), _loggable(path), status, (time.monotonic() - started) * 1000, info.id)
         start_response("%d %s" % (status, STATUS_TEXT.get(status, "Status")), headers)
@@ -327,15 +375,20 @@ class App:
         try:
             user = None
             if not r.public:
-                user = auth.authenticate(conn, req.authorization)
+                try:
+                    user = auth.authenticate(conn, req.authorization)
+                except Unauthorized:
+                    self._on_auth_failure(info)
+                    raise
                 info.user = user
+                self._charge_request(info, user)
                 if ROLE_RANK[user["role"]] < ROLE_RANK[r.role]:
                     raise Forbidden(
                         "This action requires the %r role or higher (you are %r)" % (r.role, user["role"]),
                         code="insufficient_role",
                     )
             with transaction(conn, write=req.method not in ("GET", "HEAD")):
-                ctx = Context(conn, user, self.clock(), self.tz, self.config, request=info)
+                ctx = Context(conn, user, self.clock(), self.tz, self.config, request=info, throttle=self.throttle)
                 result = r.handler(ctx, req, **params)
             notify.dispatch(self.notifier, ctx.events, self.config.public_url)
             self._audit_success(info, user, ctx)
