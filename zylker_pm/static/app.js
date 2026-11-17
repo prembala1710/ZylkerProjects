@@ -891,7 +891,7 @@ async function settingsTab(root, ctx) {
     h('div', { class: 'card' }, h('h2', { text: 'Members' }), h('p', { class: 'small muted', text: 'Members can be assigned work and can edit tasks in this project.' }), memberList,
       manage ? h('div', { class: 'row', style: { marginTop: '10px' } }, addSel, h('button', { class: 'btn', onclick: (e) => guarded(e.target, async () => { if (!addSel.value) return; Object.assign(project, await api(`/projects/${key}/members`, { method: 'POST', body: { username: addSel.value } })); route(); }) }, 'Add')) : null)),
     manage ? importCard(key) : null,
-    hasRole('admin') ? h('div', { class: 'card', style: { marginTop: '16px' } }, h('h2', { text: 'Danger zone' }), h('p', { class: 'small muted', text: 'Deleting a project permanently removes its tasks, comments, time entries and history.' }),
+    hasRole('admin') ? h('div', { class: 'card', style: { marginTop: '16px' } }, h('h2', { text: 'Danger zone' }), h('p', { class: 'small muted', text: 'Deleting a project permanently removes its tasks, comments and time entries. A record of what happened stays in the audit log.' }),
       h('button', { class: 'btn danger', onclick: () => deleteProjectDialog(project) }, 'Delete project\u2026')) : null);
 }
 function importCard(key) {
@@ -1034,7 +1034,7 @@ async function openTask(key) {
 
   async function switchTo(otherKey) { handle.close(); openTask(otherKey); }
   async function deleteTask() {
-    if (!(await confirmBox(`Delete ${task.key} permanently? Its comments, time and history go with it.`, 'Delete task', true))) return;
+    if (!(await confirmBox(`Delete ${task.key} permanently? Its comments and time entries go with it. A record of the deletion stays in the audit log.`, 'Delete task', true))) return;
     try { await api('/tasks/' + key, { method: 'DELETE' }); }
     catch (e) {
       if (e.code === 'has_subtasks' && (await confirmBox(`${e.message} Delete the subtasks too?`, 'Delete all', true))) await api('/tasks/' + key, { method: 'DELETE', query: { cascade: 'true' } });
