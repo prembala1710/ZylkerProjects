@@ -28,6 +28,7 @@ standard library alone - **no packages to install, no build step** - and stores 
   errors, with filters, a live view and CSV export (see [Audit log](#audit-log)).
 - **Brute-force protection and rate limits** - failed sign-ins block the address with growing waits, and each user has a request budget; both
   answer `429` with `Retry-After` (see [Throttling](#throttling)).
+- **Webhooks** - signed, retried, logged event delivery to other systems (chat, CI, your own service) with protection against calls to internal addresses (see [Webhooks](#webhooks)).
 - **Recurring tasks** - "every other Monday", "the last day of each month": managers define a schedule and a task template, the system creates the
   tasks on time without ever duplicating or flooding (see [Recurring tasks](#recurring-tasks)).
 
@@ -53,6 +54,7 @@ The same commands are available as `zylker-pm ...` after `pip install .`. Everyt
 | `zylker-pm rotate-token USER` | Issue a new token; the old one stops working immediately |
 | `zylker-pm digest [--days 3] [--project KEY] [--post]` | Print the overdue / due-soon digest; `--post` sends it to Cliq |
 | `zylker-pm recur-run [--project KEY] [--dry-run]` | Create the recurring tasks that are due (safe to run from cron as often as you like) |
+| `zylker-pm webhook-run [--limit N]` | Deliver the queued webhooks that are due, retries included (for installations that run `serve` with the delivery loop off) |
 | `zylker-pm backup FILE [--force]` | Write a consistent copy of the database (safe while the server runs) |
 | `zylker-pm import-csv FILE --project KEY --as USER [--dry-run] [--add-missing-members]` | Import tasks; exit code 3 means "finished, but some rows had errors" |
 | `zylker-pm seed-demo` | Load fictional sample data (refuses unless there are no projects) |
@@ -75,6 +77,8 @@ All settings are environment variables; nothing is read from the repository.
 | `ZYLKER_PROXY_HOPS` | `0` | How many reverse proxies you trust in front of the app (0-5). It decides which client address the [audit log](#audit-log) records: with `0` the connection's address is used and `X-Forwarded-For` is ignored (a client can forge it); with `1` the last entry of `X-Forwarded-For` is used, with `2` the second from the right, and so on |
 | `ZYLKER_AUTH_FAILURE_LIMIT` | `10` | Failed sign-ins from one address within five minutes before it is blocked (0-1000; `0` turns the protection off) |
 | `ZYLKER_RATE_LIMIT_PER_MINUTE` | `600` | Sustained requests per user per minute (0-100000; `0` turns the limit off) |
+| `ZYLKER_WEBHOOK_INTERVAL_SECONDS` | `2` | How often `serve` delivers queued [webhooks](#webhooks) (0-3600; `0` turns the loop off and leaves it to `zylker-pm webhook-run`) |
+| `ZYLKER_WEBHOOK_ALLOW_PRIVATE` | *(off)* | Set to `1` to let webhooks call private, loopback and link-local addresses and use plain `http` - only for receivers on a trusted internal network |
 | `ZYLKER_RECURRENCE_CHECK_MINUTES` | `15` | How often `serve` looks for recurring tasks that are due (0-1440; `0` turns the check off and leaves it to `zylker-pm recur-run`) |
 
 ## Custom project fields
@@ -143,6 +147,22 @@ The server defends itself against guessing and runaway clients; nothing needs co
   admins can list or lift blocks with `GET` / `DELETE /api/security/blocks`.
 - **Honest limits.** State is in memory and per process (a restart clears it; several processes each count on their own). Behind a reverse proxy set
   `ZYLKER_PROXY_HOPS`, otherwise every client looks like the proxy. This is a safety net, not a firewall: keep throttling at the proxy too if the app is exposed.
+
+## Webhooks
+
+Tell other systems when something happens. An administrator registers a URL with `POST /api/webhooks` (there is no screen for it yet), the events it wants (`task.created`, `task.*`, `project.*`, `auth.*`, or `*`), and optionally one project.
+
+- **Signed.** Every request carries `X-Zylker-Signature` (HMAC-SHA256 over timestamp and body with the webhook's secret) and a timestamp, so the receiver can prove it came from here and
+  refuse replays. The secret is shown once, when the webhook is created or its secret rotated. A short verifier is in [docs/API.md](docs/API.md#webhooks).
+- **Never lost, never announced early.** The event is queued in the same transaction as the change: a rolled-back change sends nothing, a crash loses nothing.
+- **Retried.** Anything but a 2xx is retried after 1 min, 5 min, 30 min, 2 h and 6 h. Delivery is at least once, so receivers ignore repeats of the same `X-Zylker-Delivery` id.
+- **Self-protecting.** A receiver that fails 15 times in a row (or answers `410 Gone`) is switched off and an audit warning says so; the queue per webhook is capped; the log is pruned after 30 days.
+- **Cannot be turned on your own network.** URLs must be `https`; private, loopback and cloud-metadata addresses are refused when saved *and* again at delivery (the name is resolved once and that address is
+  used, which defeats DNS rebinding), redirects are not followed, and response bodies are not kept. `ZYLKER_WEBHOOK_ALLOW_PRIVATE=1` is the explicit opt-out for internal receivers.
+- **Inspectable.** Every delivery, with its attempts, status codes and error codes, is in the delivery log; failed ones can be redelivered, and a test ping checks a new receiver.
+
+Webhook events are not themselves delivered (no loops). The secret is stored in the database because it is needed to sign; protect backups as you would the database. Delivery state lives in the database, so
+several `serve` processes or a `webhook-run` cron job can share the work without sending anything twice.
 
 ## Recurring tasks
 
@@ -293,7 +313,7 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~370 tests, no dependencies
+python -m unittest discover -s tests -v     # ~475 tests, no dependencies
 pip install playwright && playwright install chromium
 python -m unittest discover -s tests -p "test_ui_*.py" -v   # 38 real-browser tests (skipped automatically without Playwright)
 ```
@@ -314,7 +334,7 @@ tests/                 unit, HTTP, CLI and browser tests
 ## Limitations and ideas for later
 
 Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), task templates or
-attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
