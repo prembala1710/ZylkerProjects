@@ -339,7 +339,8 @@ function renderShell() {
     hasRole('manager') ? h('button', { class: 'btn small', style: { margin: '8px 10px' }, onclick: openCreateProject }, '+ New project') : null,
     hasRole('admin') ? h('div', { class: 'nav-heading', text: 'Admin' }) : null,
     hasRole('admin') ? h('a', { class: 'nav-link', href: '#/users', dataset: { route: 'users' } }, 'Users & access') : null,
-    hasRole('admin') ? h('a', { class: 'nav-link', href: '#/fields', dataset: { route: 'fields' } }, 'Project fields') : null);
+    hasRole('admin') ? h('a', { class: 'nav-link', href: '#/fields', dataset: { route: 'fields' } }, 'Project fields') : null,
+    hasRole('admin') ? h('a', { class: 'nav-link', href: '#/audit', dataset: { route: 'audit' } }, 'Audit log') : null);
 
   const topbar = h('header', { class: 'topbar' }, h('div', { class: 'search' }, searchBox, results), h('span', { class: 'spacer' }),
     avatar(state.me), h('div', { class: 'user-chip' }, h('div', { text: state.me.display_name }), h('div', { class: 'small muted', text: state.me.role })),
@@ -377,6 +378,7 @@ async function route() {
     else if (a === 'team') await teamView(view, alive);
     else if (a === 'users' && hasRole('admin')) await usersView(view, alive);
     else if (a === 'fields' && hasRole('admin')) await fieldsView(view, alive);
+    else if (a === 'audit' && hasRole('admin')) await auditView(view, alive);
     else await dashboardView(view, alive);
   } catch (e) {
     if (!alive() || !state.token) return;
@@ -816,6 +818,15 @@ function describeActivity(a) {
     case 'milestone.deleted': return `deleted milestone \u201c${d.name}\u201d`;
     case 'project.created': return `created the project`;
     case 'project.updated': return `updated the project (${change(d.changes)})`;
+    case 'user.created': return `created the user ${d.username} (${d.role})`;
+    case 'user.updated': return `updated the user ${d.user} (${change(d.changes)})`;
+    case 'user.token_rotated': return `issued a new token for ${d.user}`;
+    case 'auth.failed': return `was refused: ${d.reason === 'missing_token' ? 'no token supplied' : 'unrecognised or revoked token'} (${d.method} ${d.path})`;
+    case 'auth.denied': return `was not allowed to ${d.method} ${d.route} (${String(d.code || '').replace(/_/g, ' ')})`;
+    case 'auth.session_started': return 'started a session';
+    case 'data.exported': return `exported ${plural(d.rows, 'row')} of ${d.what}${d.project ? ' from ' + d.project : ''}`;
+    case 'audit.exported': return `exported the audit log (${plural(d.rows, 'row')}${d.truncated ? ', cut at the limit' : ''})`;
+    case 'system.error': return `hit a server error in ${d.route} (${d.error})`;
     case 'project_field.created': return `defined the ${FIELD_TYPE_LABEL[d.type] || ''} project field \u201c${d.label}\u201d`;
     case 'project_field.updated': return `changed the project field \u201c${fieldLabel(d.key)}\u201d (${change(d.changes)})`;
     case 'project_field.deleted': return `deleted the project field \u201c${d.label}\u201d (removed ${plural(d.values_removed, 'value')})`;
@@ -1197,6 +1208,168 @@ function deleteFieldDialog(def) {
   input.addEventListener('input', () => { go.disabled = input.value !== def.key; });
   const m = openModal({ title: `Delete \u201c${def.label}\u201d?`, narrow: true, content: h('div', { class: 'stack' },
     h('p', { text: `This removes the field and its value from every project. It cannot be undone. Type ${def.key} to confirm.` }), input), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), go] });
+}
+
+/* ============================== admin: audit log ============================== */
+const SEVERITY_LABEL = { info: 'Info', notice: 'Notice', warning: 'Warning', error: 'Error' };
+const SEVERITY_PRESETS = [['', 'Any severity'], ['notice,warning,error', 'Notable and above'], ['warning,error', 'Warnings and errors'], ['error', 'Errors only'], ['info', 'Routine only']];
+const fmtStamp = (iso) => new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+const auditText = (e) => describeActivity(e) + (e.details && e.details.count > 1 ? ` \u00d7${e.details.count}` : '');
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = h('a', { href: url, download: filename });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+async function auditView(view, alive) {
+  const FILTERS = ['q', 'category', 'severity', 'actor', 'project', 'ip', 'request_id', 'from', 'to'];
+  const f = {};
+  let days = 7, live = false, items = [], newest = 0, nextBefore = null, timer = null;
+  const summaryBox = h('div');
+  const listBox = h('div', { class: 'audit-list', role: 'list', 'aria-label': 'Audit events' });
+  const moreBox = h('div', { class: 'row', style: { marginTop: '12px' } });
+  const status = h('span', { class: 'small muted', role: 'status', 'aria-live': 'polite' });
+  const active = () => Object.fromEntries(FILTERS.filter((k) => f[k]).map((k) => [k, f[k]]));
+
+  const controls = {
+    q: h('input', { type: 'search', placeholder: 'Search people, actions, tasks, addresses\u2026', 'aria-label': 'Search the audit log', autocomplete: 'off' }),
+    category: h('select', { 'aria-label': 'Category' }, optionList([['', 'All categories'], ...Object.entries(state.meta.audit_categories)])),
+    severity: h('select', { 'aria-label': 'Severity' }, optionList(SEVERITY_PRESETS)),
+    actor: h('select', { 'aria-label': 'Person' }, optionList([['', 'Anyone'], ['system', 'System / command line'], ...userPairs(state.users)])),
+    project: h('input', { type: 'text', list: 'audit-projects', placeholder: 'Project key', 'aria-label': 'Project', autocomplete: 'off', maxlength: 10 }),
+    from: h('input', { type: 'date', 'aria-label': 'From date' }),
+    to: h('input', { type: 'date', 'aria-label': 'To date' }),
+  };
+  const sync = () => { for (const [k, el] of Object.entries(controls)) el.value = f[k] || ''; };
+  const setFilter = (patch) => { Object.assign(f, patch); sync(); reload(); };
+  // The value is stored the moment it changes; only the reload is delayed (so typing does not fire a request per key).
+  // Delaying the value itself would let a quick change in one control cancel a pending change in another.
+  let debounce;
+  for (const [k, el] of Object.entries(controls)) {
+    const typing = k === 'q' || k === 'project';
+    el.addEventListener(typing ? 'input' : 'change', () => {
+      f[k] = k === 'project' ? el.value.trim().toUpperCase() : el.value.trim();
+      clearTimeout(debounce);
+      debounce = setTimeout(reload, typing ? 300 : 0);
+    });
+  }
+
+  function summaryView(sm) {
+    clear(summaryBox);
+    const sec = sm.security;
+    const max = Math.max(1, ...sm.by_day.map((d) => d.count));
+    const bw = 100 / sm.by_day.length;
+    const chart = sv('svg', { class: 'chart bars', viewBox: '0 0 100 40', preserveAspectRatio: 'none', role: 'img', 'aria-label': `Events per day, ${sm.from} to ${sm.to}` },
+      sm.by_day.map((d, i) => sv('rect', { class: 'bar-day', x: i * bw + bw * 0.12, width: bw * 0.76, y: 38 - (36 * d.count) / max, height: Math.max(0.6, (36 * d.count) / max), rx: 0.6 },
+        sv('title', {}, `${fmtDate(d.date)}: ${plural(d.count, 'event')}`))));
+    put(summaryBox,
+      h('div', { class: 'grid kpis' }, kpi(`Events, ${days === 1 ? 'today' : 'last ' + days + ' days'}`, sm.total), kpi('Failed sign-ins', sec.failed_sign_ins, sec.failed_sign_ins ? 'bad' : ''),
+        kpi('Permission denials', sec.permission_denials, sec.permission_denials ? 'warn' : ''), kpi('Server errors', sec.errors, sec.errors ? 'bad' : '')),
+      h('div', { class: 'grid two', style: { marginTop: '16px' } },
+        h('div', { class: 'card' }, h('div', { class: 'row' }, h('h2', { text: 'Activity' }), h('span', { class: 'spacer' }),
+          h('select', { class: 'inline', 'aria-label': 'Summary period', value: String(days), onchange: (e) => { days = Number(e.target.value); loadSummary(); } }, optionList([['1', 'Today'], ['7', '7 days'], ['30', '30 days'], ['90', '90 days']]))),
+          chart, h('div', { class: 'row small muted', style: { justifyContent: 'space-between' } }, h('span', { text: fmtDate(sm.from) }), h('span', { text: `peak ${max}/day` }), h('span', { text: fmtDate(sm.to) }))),
+        h('div', { class: 'card' }, h('h2', { text: 'What is happening' }),
+          h('div', { class: 'row wrap' }, sm.by_category.map((c) => h('button', { type: 'button', class: 'chip-btn' + (f.category === c.category ? ' on' : ''), onclick: () => setFilter({ category: f.category === c.category ? '' : c.category }) }, `${c.label} `, h('strong', { text: c.count })))),
+          sec.top_failing_addresses.length ? h('div', { style: { marginTop: '12px' } }, h('div', { class: 'cf-heading', text: 'Most failed sign-ins by address' }),
+            sec.top_failing_addresses.map((a) => h('div', { class: 'item' }, h('code', { text: a.ip }), h('span', { class: 'grow small muted', text: plural(a.attempts, 'attempt') }),
+              a.ip === 'unknown' ? null : h('button', { class: 'btn small', onclick: () => setFilter({ ip: a.ip, category: 'auth' }) }, 'Show')))) : null,
+          sm.top_actors.length ? h('div', { style: { marginTop: '12px' } }, h('div', { class: 'cf-heading', text: 'Most active' }),
+            sm.top_actors.slice(0, 5).map((a) => h('div', { class: 'item' }, avatar(a.actor), h('span', { class: 'grow', text: a.actor ? a.actor.display_name : 'System / command line' }), h('span', { class: 'small muted', text: plural(a.count, 'event') })))) : null)));
+  }
+  async function loadSummary() {
+    try { const sm = await api('/audit/summary', { query: { days } }); if (alive()) summaryView(sm); } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function row(e, fresh) {
+    const where = [e.project, e.task].filter(Boolean).join(' / ');
+    const panel = h('div', { class: 'audit-detail hidden' },
+      h('dl', { class: 'kv' },
+        h('dt', { text: 'Action' }), h('dd', {}, h('code', { text: e.action })),
+        h('dt', { text: 'When' }), h('dd', { text: `${fmtStamp(e.created_at)} (${e.created_at})` }),
+        h('dt', { text: 'Address' }), h('dd', {}, e.ip ? [h('code', { text: e.ip }), ' ', h('button', { type: 'button', class: 'btn small', onclick: () => setFilter({ ip: e.ip }) }, 'Only this address')] : '\u2014'),
+        h('dt', { text: 'Request' }), h('dd', {}, e.request_id ? [h('code', { text: e.request_id }), ' ', h('button', { type: 'button', class: 'btn small', onclick: () => setFilter({ request_id: e.request_id }) }, 'Everything in this request')] : '\u2014'),
+        e.actor ? [h('dt', { text: 'Person' }), h('dd', {}, `${e.actor.display_name} (${e.actor.username}) `, h('button', { type: 'button', class: 'btn small', onclick: () => setFilter({ actor: e.actor.username }) }, 'Only this person'))] : null),
+      h('pre', { class: 'audit-json', tabindex: 0, 'aria-label': 'Event details', text: JSON.stringify(e.details, null, 2) }));
+    const head = h('button', { type: 'button', class: 'audit-head', 'aria-expanded': 'false', onclick: () => { const open = panel.classList.toggle('hidden') === false; head.setAttribute('aria-expanded', String(open)); } },
+      h('span', { class: 'audit-time nowrap', title: e.created_at, text: fmtAgo(e.created_at) }),
+      h('span', { class: 'badge sev-' + e.severity, text: SEVERITY_LABEL[e.severity] }),
+      h('span', { class: 'audit-who' }, avatar(e.actor), h('span', { class: 'ellipsis', text: e.actor ? e.actor.display_name : e.category === 'auth' ? 'Unknown client' : 'System' })),
+      h('span', { class: 'audit-what', text: auditText(e) }),
+      h('span', { class: 'audit-where small muted ellipsis', text: where }),
+      h('span', { class: 'audit-ip small muted nowrap', text: e.ip || '' }));
+    return h('article', { class: 'audit-row sev-' + e.severity + (fresh ? ' fresh' : ''), role: 'listitem' }, head, panel);
+  }
+  const renderList = (freshIds = new Set()) => {
+    clear(listBox);
+    if (!items.length) listBox.append(h('div', { class: 'empty', text: 'No events match these filters.' }));
+    for (const e of items) listBox.append(row(e, freshIds.has(e.id)));
+    clear(moreBox);
+    if (nextBefore) moreBox.append(h('button', { class: 'btn', onclick: (ev) => guarded(ev.target, loadOlder) }, 'Load older events'));
+  };
+  async function reload() {
+    try {
+      const r = await api('/audit', { query: { ...active(), limit: 50 } });
+      if (!alive()) return;
+      items = r.items; newest = r.newest_id; nextBefore = r.next_before;
+      status.textContent = `${r.total_capped ? r.total.toLocaleString() + '+' : r.total.toLocaleString()} matching ${r.total === 1 ? 'event' : 'events'}`;
+      renderList();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  async function loadOlder() {
+    const r = await api('/audit', { query: { ...active(), limit: 50, before: nextBefore } });
+    items = items.concat(r.items); nextBefore = r.next_before;
+    renderList();
+  }
+  async function tick() {
+    if (!alive() || !view.isConnected) return stopLive(true);
+    if (document.hidden) return;
+    try {
+      const r = await api('/audit', { query: { ...active(), limit: 50, after: newest } });
+      if (!alive()) return;
+      if (r.gap) { await reload(); loadSummary(); return; } // more arrived than one page: start over rather than show a hole
+      newest = Math.max(newest, r.newest_id);
+      if (!r.items.length) return;
+      items = [...r.items, ...items].slice(0, 1000);
+      if (items.length === 1000) nextBefore = items[items.length - 1].id;
+      renderList(new Set(r.items.map((e) => e.id)));
+      loadSummary();
+    } catch (e) { /* a missed poll is harmless: the next one catches up */ }
+  }
+  const onVisible = () => { if (live && !document.hidden) tick(); };
+  function stopLive(silent) {
+    clearInterval(timer); timer = null; live = false;
+    document.removeEventListener('visibilitychange', onVisible);
+    if (!silent) liveBox.classList.remove('on');
+    liveToggle.checked = false;
+  }
+  const liveToggle = h('input', { type: 'checkbox', 'aria-label': 'Live updates', onchange: (e) => {
+    if (e.target.checked) { live = true; liveBox.classList.add('on'); timer = setInterval(tick, 5000); document.addEventListener('visibilitychange', onVisible); tick(); }
+    else stopLive();
+  } });
+  const liveBox = h('label', { class: 'live row small', title: 'Check for new events every few seconds' }, liveToggle, h('span', { class: 'live-dot', 'aria-hidden': 'true' }), 'Live');
+
+  const attention = h('button', { type: 'button', class: 'btn', onclick: () => setFilter({ severity: f.severity === 'warning,error' ? '' : 'warning,error', category: '' }) }, 'Needs attention');
+  const exportBtn = h('button', { class: 'btn', onclick: (e) => guarded(e.target, async () => {
+    downloadBlob(await api('/audit/export.csv', { blob: true, query: active() }), 'audit-log.csv');
+    toast('Exported. This export is recorded in the log.', 'ok');
+    if (live) tick();
+  }) }, 'Export CSV');
+
+  clear(view);
+  put(view,
+    h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('h1', { text: 'Audit log' }),
+      h('p', { class: 'muted', text: 'Every change to data, plus failed sign-ins, permission denials, exports and server errors. Routine reading is not recorded.' })),
+      liveBox, exportBtn),
+    summaryBox,
+    h('datalist', { id: 'audit-projects' }, state.projects.map((p) => h('option', { value: p.key }))),
+    h('div', { class: 'toolbar', style: { marginTop: '18px' }, role: 'search' }, controls.q, controls.category, controls.severity, controls.actor, controls.project,
+      h('label', { class: 'row small' }, 'From', controls.from), h('label', { class: 'row small' }, 'To', controls.to),
+      attention, h('button', { class: 'btn ghost', onclick: () => { for (const k of FILTERS) f[k] = ''; setFilter({}); } }, 'Clear')),
+    h('div', { class: 'row small muted', style: { margin: '-6px 0 10px' } }, status, h('span', { class: 'spacer' }), h('span', { text: `Dates are in the server's timezone (${state.meta.timezone}); times show in yours.` })),
+    h('div', { class: 'card flush audit-card' }, listBox), moreBox);
+  await Promise.all([reload(), loadSummary()]);
 }
 
 /* ============================== boot ============================== */
