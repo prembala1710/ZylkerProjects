@@ -484,16 +484,17 @@ def delete_task(ctx, key, cascade=False):
     row = taskrefs.get_row(conn, key)
     project = projects.get_row(conn, row["project_key"])
     projects.require_write(ctx, project)
-    descendants, frontier = 0, [row["id"]]
-    while frontier and descendants < 100000:
+    descendant_ids, frontier = [], [row["id"]]
+    while frontier and len(descendant_ids) < 100000:
         kids = [
             r[0]
             for r in conn.execute(
                 "SELECT id FROM tasks WHERE parent_id IN (%s)" % ",".join("?" * len(frontier)), frontier
             )
         ]
-        descendants += len(kids)
+        descendant_ids += kids
         frontier = kids
+    descendants = len(descendant_ids)
     if descendants and not cascade:
         raise Conflict(
             "%s has %d subtask(s). Delete them too with ?cascade=true." % (taskrefs.key_of(row), descendants),
@@ -501,8 +502,9 @@ def delete_task(ctx, key, cascade=False):
             details={"subtasks": descendants},
         )
     conn.execute("DELETE FROM tasks WHERE id = ?", (row["id"],))
+    activity.detach_task(conn, [row["id"], *descendant_ids])  # SQLite may reuse these ids; history must not follow
     activity.log(
-        ctx, "task.deleted", project_id=row["project_id"], task_id=row["id"], task_key=taskrefs.key_of(row),
+        ctx, "task.deleted", project_id=row["project_id"], task_key=taskrefs.key_of(row),
         details={"title": row["title"], "subtasks_deleted": descendants},
     )  # fmt: skip
 
