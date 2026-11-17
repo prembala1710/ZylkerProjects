@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import re
 
 from . import __version__
@@ -18,7 +20,7 @@ from .domain import (
     TRANSITIONS,
 )
 from .errors import NotFound, ValidationError
-from .services import activity, collab, csvio, deps, milestones, project_fields, projects, reports, taskrefs, tasks, users
+from .services import activity, audit, collab, csvio, deps, milestones, project_fields, projects, reports, taskrefs, tasks, users
 from .util import truthy
 
 
@@ -68,6 +70,8 @@ def meta(ctx, req):
         "max_task_depth": MAX_TASK_DEPTH,
         "project_field_types": list(project_fields.FIELD_TYPES),
         "project_field_limits": project_fields.LIMITS,
+        "audit_categories": audit.CATEGORIES,
+        "audit_severities": list(audit.SEVERITIES),
     }
 
 
@@ -104,6 +108,31 @@ def rotate_token(ctx, req, user_id):
 @route("GET", "/api/activity", role="admin")
 def global_activity(ctx, req):
     return activity.list_activity(ctx, limit=req.query.get("limit", 50), before=req.query.get("before"))
+
+
+# ------------------------------------------------------------------------ audit log
+
+AUDIT_FILTERS = ("q", "actor", "category", "action", "severity", "project", "ip", "request_id", "from", "to")
+
+
+@route("GET", "/api/audit", role="admin")
+def audit_list(ctx, req):
+    return audit.query(ctx, req.query)
+
+
+@route("GET", "/api/audit/summary", role="admin")
+def audit_summary(ctx, req):
+    return audit.summary(ctx, req.query)
+
+
+@route("GET", "/api/audit/export.csv", role="admin")
+def audit_export(ctx, req):
+    text, rows, truncated = audit.export_csv(ctx, req.query)
+    ctx.audit("audit.exported", rows=rows, truncated=truncated, filters={k: req.query[k] for k in AUDIT_FILTERS if req.query.get(k)})
+    headers = [("Content-Disposition", 'attachment; filename="audit-log.csv"')]
+    if truncated:
+        headers.append(("X-Export-Truncated", "true"))
+    return Raw(text.encode("utf-8-sig"), "text/csv; charset=utf-8", headers=headers)
 
 
 # ------------------------------------------------------------------------- projects
@@ -185,6 +214,8 @@ def create_milestone(ctx, req, key):
 @route("GET", "/api/projects/{key}/export.csv")
 def export_csv(ctx, req, key):
     text = csvio.export_csv(ctx, key)
+    rows = max(sum(1 for _ in csv.reader(io.StringIO(text))) - 1, 0)  # minus the header
+    ctx.audit("data.exported", what="project tasks", project=key.upper(), rows=rows)
     filename = re.sub(r"[^A-Za-z0-9_.-]", "_", key.upper()) + "-tasks.csv"
     return Raw(
         text.encode("utf-8-sig"),

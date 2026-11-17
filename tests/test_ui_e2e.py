@@ -160,7 +160,7 @@ class LoginTests(UiCase):
 class PageTests(UiCase):
     def test_every_page_renders_cleanly_for_an_admin(self):
         page = self.open("prem")
-        routes = ["#/dashboard", "#/mine", "#/team", "#/users", "#/fields"]
+        routes = ["#/dashboard", "#/mine", "#/team", "#/users", "#/fields", "#/audit"]
         for key in ("WEB", "APP", "INT"):
             routes += ["#/p/%s/%s" % (key, tab) for tab in ("board", "list", "timeline", "milestones", "reports", "activity", "settings")]
         for r in routes:
@@ -556,3 +556,153 @@ class CustomFieldTests(UiCase):
             self.settle(page)
             overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
             self.assertLessEqual(overflow, 1, "horizontal page overflow on %s" % r)
+
+
+def raw_call(path, token, headers=None, method="GET", body=None):
+    """A request the way a hostile or misconfigured client might send it (the shared api() helper cannot set headers)."""
+    req = urllib.request.Request(BASE + "/api" + path, method=method, data=json.dumps(body).encode() if body is not None else None)
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+class AuditLogTests(UiCase):
+    """The admin log monitor: security events appear, filters work, the live view updates, nothing renders as markup."""
+
+    def provoke_security_events(self):
+        for _ in range(3):
+            self.assertEqual(raw_call("/projects", "zpm_definitely-wrong"), 401)
+        self.assertEqual(raw_call("/users", TOKENS["bob"], method="POST", body={"username": "nope1", "display_name": "No"}), 403)
+
+    def test_admin_sees_security_events_and_can_dig_into_them(self):
+        self.provoke_security_events()
+        page = self.open("prem", "#/audit")
+        self.settle(page)
+        expect(page.locator("#view h1")).to_have_text("Audit log")
+        self.assert_clean_text(page, "audit log")
+        expect(page.locator(".kpi", has_text="Failed sign-ins").locator(".value")).not_to_have_text("0")
+        refused = page.locator(".audit-row", has_text="unrecognised or revoked token").first
+        expect(refused).to_be_visible()
+        expect(refused.locator(".badge")).to_have_text("Warning")
+        expect(refused).to_contain_text("Unknown client")  # nobody was signed in, so nobody is named
+        expect(page.locator(".audit-row", has_text="was not allowed to POST /api/users").first).to_contain_text("Bob Chen")
+        # details are one click away, and they are real: request id, address, the raw JSON
+        refused.locator(".audit-head").click()
+        detail = refused.locator(".audit-detail")
+        expect(detail).to_be_visible()
+        expect(refused.locator(".audit-head")).to_have_attribute("aria-expanded", "true")
+        expect(detail.locator("code").first).to_have_text("auth.failed")
+        expect(detail.locator("pre")).to_contain_text('"reason": "invalid_token"')
+        self.assertNotIn("definitely-wrong", page.inner_text("body"))  # the token itself is never on the page
+        # narrow down: "Needs attention" keeps only warnings and errors
+        page.get_by_role("button", name="Needs attention").click()
+        expect(page.locator(".audit-row .badge", has_text="Info")).to_have_count(0)
+        expect(page.locator(".audit-row").first).to_be_visible()
+        # then pivot on the address, and clear everything again
+        page.locator(".audit-row", has_text="unrecognised or revoked token").first.locator(".audit-head").click()
+        page.get_by_role("button", name="Only this address").first.click()
+        expect(page.locator("[role=status]").first).to_contain_text("matching")
+        page.get_by_role("button", name="Clear").click()
+        expect(page.locator(".audit-row .badge", has_text="Info").first).to_be_visible()
+
+    def test_search_category_and_person_filters(self):
+        self.provoke_security_events()
+        page = self.open("prem", "#/audit")
+        self.settle(page)
+        page.get_by_label("Search the audit log").fill("insufficient_role")
+        expect(page.locator(".audit-row").first).to_contain_text("was not allowed")
+        expect(page.locator(".audit-row", has_text="started a session")).to_have_count(0)
+        page.get_by_label("Search the audit log").fill("")
+        page.get_by_label("Category").select_option("task")
+        expect(page.locator(".audit-row").first).to_contain_text("WEB-")
+        expect(page.locator(".audit-row", has_text="started a session")).to_have_count(0)
+        page.get_by_label("Category").select_option("")
+        page.get_by_label("Person").select_option("system")
+        expect(page.locator("[role=status]").first).to_contain_text("matching")
+        page.get_by_label("Search the audit log").fill("zzz-nothing-matches-this-zzz")
+        page.get_by_label("Person").select_option("")
+        expect(page.get_by_text("No events match these filters.")).to_be_visible()
+
+    def test_a_quick_change_in_one_filter_never_cancels_a_pending_change_in_another(self):
+        # Regression: one shared debounce timer meant changing a dropdown right after typing dropped the typed search.
+        page = self.open("prem", "#/audit")
+        self.settle(page)
+        page.get_by_label("Search the audit log").fill("created")
+        page.get_by_label("Category").select_option("task")  # within the search box's delay
+        self.settle(page)
+        expect(page.locator(".audit-row").first).to_be_visible()
+        for row in page.locator(".audit-row").all():
+            expect(row).to_contain_text("created")  # the search still applies ...
+            expect(row.locator(".audit-where")).to_contain_text("-")  # ... together with the task category
+
+    def test_the_live_view_shows_new_events_without_a_reload(self):
+        page = self.open("prem", "#/audit")
+        self.settle(page)
+        page.get_by_label("Live updates").check()
+        marker = "Live view marker"
+        status = api(TOKENS["alice"], "PATCH", "/projects/INT", {"description": marker})
+        self.assertEqual(status[0], 200)
+        self.addCleanup(lambda: api(TOKENS["alice"], "PATCH", "/projects/INT", {"description": "Scope and build the next set of chat integrations."}))
+        fresh = page.locator(".audit-row", has_text="updated the project").first
+        expect(fresh).to_be_visible(timeout=15000)  # the page polls every few seconds
+        expect(fresh).to_contain_text("Alice Morgan")
+        page.get_by_label("Live updates").uncheck()
+        expect(page.locator(".live.on")).to_have_count(0)
+
+    def test_export_downloads_a_csv_and_the_export_is_itself_logged(self):
+        page = self.open("prem", "#/audit")
+        self.settle(page)
+        with page.expect_download() as info:
+            page.get_by_role("button", name="Export CSV").click()
+        content = open(info.value.path(), encoding="utf-8-sig").read()
+        self.assertTrue(content.startswith("id,time_utc,severity,category,action,actor"))
+        self.assertEqual(info.value.suggested_filename, "audit-log.csv")
+        expect(page.locator(".toast.ok")).to_contain_text("recorded in the log")
+        status, body = api(TOKENS["prem"], "GET", "/audit?action=audit.exported")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(body["total"], 1)
+
+    def test_only_admins_get_the_page_and_the_data(self):
+        page = self.open("alice", "#/audit")  # a manager
+        self.settle(page)
+        expect(page.get_by_text("Audit log", exact=True)).to_have_count(0)  # not offered in the navigation
+        expect(page.locator("#view h1")).to_have_text("Dashboard")  # and the address does not lead anywhere
+        for path in ("/audit", "/audit/summary", "/audit/export.csv"):
+            self.assertEqual(api(TOKENS["alice"], "GET", path)[0], 403, path)
+            self.assertEqual(api(TOKENS["erin"], "GET", path)[0], 403, path)
+
+    def test_hostile_text_in_the_log_is_shown_as_text_never_executed(self):
+        title = "<img src=x onerror=window.__pwned=1>"
+        status, task = api(TOKENS["prem"], "POST", "/projects/WEB/tasks", {"title": title})
+        self.assertEqual(status, 201)
+        self.addCleanup(lambda: api(TOKENS["prem"], "DELETE", "/tasks/%s" % task["key"]))
+        agent = "<svg onload=window.__pwned=2>"
+        raw_call("/projects", None, headers={"User-Agent": agent})  # no token at all: its own kind of failure, so its own row
+        page = self.open("prem", "#/audit")
+        self.settle(page)
+        created = page.locator(".audit-row", has_text="created " + task["key"]).first
+        expect(created).to_contain_text(title)  # literal characters
+        refused = page.locator(".audit-row", has_text="no token supplied").first
+        refused.locator(".audit-head").click()
+        expect(refused.locator("pre")).to_contain_text(agent)
+        self.assertEqual(page.evaluate("typeof window.__pwned"), "undefined")
+        self.assertEqual(page.locator(".audit-list img, .audit-list svg[onload]").count(), 0)
+
+    def test_the_page_holds_together_on_a_phone(self):
+        self.provoke_security_events()
+        page = self.open("prem", "#/audit", viewport={"width": 390, "height": 800})
+        self.settle(page)
+        expect(page.locator(".audit-row").first).to_be_visible()
+        overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
+        self.assertLessEqual(overflow, 1)
+        page.locator(".audit-head").first.click()
+        overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
+        self.assertLessEqual(overflow, 1)  # an expanded row, with its long ids, must not widen the page

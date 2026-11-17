@@ -276,8 +276,9 @@ def delete_project(ctx, key, confirm):
             "Deleting a project is permanent. Repeat the request with ?confirm=%s" % row["key"],
             code="confirmation_required",
         )
+    activity.detach_project(ctx.conn, row["id"])  # history outlives the project; only the reusable id is let go
     ctx.conn.execute("DELETE FROM projects WHERE id = ?", (row["id"],))
-    activity.log(ctx, "project.deleted", details={"key": row["key"], "name": row["name"]})
+    activity.log(ctx, "project.deleted", project_key=row["key"], details={"key": row["key"], "name": row["name"]})
 
 
 def add_member(ctx, key, username):

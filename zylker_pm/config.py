@@ -36,6 +36,7 @@ class Config:
     max_body_bytes: int = 1_000_000
     max_import_bytes: int = 5_000_000
     default_task_hours: float = 8.0  # duration assumed for unestimated tasks in critical path
+    proxy_hops: int = 0  # trusted reverse proxies in front of the app; decides which client address the audit log records
 
     @classmethod
     def from_env(cls, env=None) -> Config:
@@ -48,6 +49,10 @@ class Config:
             port = int(get("PORT", "8080"))
         except ValueError:
             raise ValueError("ZYLKER_PORT must be an integer") from None
+        try:
+            proxy_hops = int(get("PROXY_HOPS", "0"))
+        except ValueError:
+            raise ValueError("ZYLKER_PROXY_HOPS must be an integer") from None
         cfg = cls(
             db_path=get("DB", "zylker.db"),
             host=get("HOST", "127.0.0.1"),
@@ -56,12 +61,15 @@ class Config:
             public_url=get("PUBLIC_URL").rstrip("/"),
             cliq_endpoint=get("CLIQ_ENDPOINT"),
             cliq_bot_unique_name=get("CLIQ_BOT_UNIQUE_NAME"),
+            proxy_hops=proxy_hops,
         )
         cfg.validate()
         return cfg
 
     def validate(self) -> None:
         get_tz(self.timezone)
+        if not 0 <= self.proxy_hops <= 5:
+            raise ValueError("ZYLKER_PROXY_HOPS must be between 0 and 5")
         if self.cliq_endpoint:
             parsed = urlparse(self.cliq_endpoint)
             local = parsed.hostname in LOOPBACK_HOSTS
