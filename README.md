@@ -36,6 +36,8 @@ standard library alone - **no packages to install, no build step** - and stores 
   working-day ideal line, close with unfinished work carried over, and get velocity and a delivery forecast from the sprints that have closed (see [Sprints](#sprints)).
 - **Project templates** - save the shape of a project (milestones, task tree, dependencies, estimates, labels, who-does-what as role slots) and start new projects from it:
   pick a start day and every date moves, fill the slots with real people, preview first (see [Project templates](#project-templates)).
+- **Timesheet approval** - people submit a week of logged time, a manager approves it or sends it back with a reason, and an approved week is locked: nobody can add or remove
+  time in it, and the figures can be proven unchanged (see [Timesheet approval](#timesheet-approval)).
 - **Scoped, expiring API tokens** - credentials for scripts and integrations that expire, can be capped to a lower role, made read-only or limited to
   certain addresses, and can be revoked at any time (see [API tokens](#api-tokens)).
 
@@ -255,14 +257,29 @@ Every consultancy, product team or IT department starts the same kinds of projec
 A template is a snapshot: later changes to the project it came from do not reach it, and deleting a template leaves its projects alone. Templates are managed through the API only (no screen yet) and their structure cannot be edited, only renamed.
 Reference: [docs/API.md](docs/API.md#project-templates).
 
+## Timesheet approval
+
+Time logged on tasks becomes a **timesheet** per person and week (Monday to Sunday). Nothing has to be set up: a week nobody has submitted is just *open*.
+
+- **Submit.** `POST /api/timesheets/submit` (or `GET /api/timesheets/week` first to see the week with its totals per day and project). The week needs at least one entry and no day over 24 hours; a long day, weekend work or more hours than the person's weekly capacity are shown as warnings, not blocks.
+- **Decide.** A manager sees the queue (`GET /api/timesheets?status=submitted`, oldest first) and approves, or rejects with a **reason**; approving many at once reports each sheet that could not be approved and why. A rejected week opens again, is fixed and submitted again.
+- **Locked means locked.** While a week is submitted or approved nobody - managers and administrators included - can log time on its days or delete its entries, and a task or project with hours in it cannot be deleted. Only the owner can withdraw a submitted week, and only an administrator, with a reason, can reopen an approved one.
+- **Separation of duties.** Nobody decides on their own timesheet, and the approver's role must be at least the owner's.
+- **Provably unchanged.** Submitting stores a digest of the entries; approving checks it, and every approved week reports whether its entries still match (`integrity`), even against a change made directly in the database.
+- **No approving what you did not read.** A decision can name the revision it looked at; if the person resubmitted meanwhile it is refused.
+- **Chasing and reporting.** `GET /api/timesheets/missing` lists time logged in finished weeks that nobody submitted; `GET /api/timesheets/summary` splits hours into approved, submitted and open per project and person.
+- **Visible.** Every submission and decision is in the [audit log](#audit-log) and the sheet's own history, can be sent to [webhooks](#webhooks) (`timesheet.*`) and is announced in Cliq.
+
+Timesheets are managed through the API only (no screen yet). Reference: [docs/API.md](docs/API.md#timesheets).
+
 ## Roles
 
 | Role | Can |
 |---|---|
 | **viewer** | Read everything: projects, tasks, reports, exports |
 | **member** | Viewer + create/edit tasks, comment, log time and link dependencies **in projects they belong to** |
-| **manager** | Member + everything in *any* project: create and edit projects, manage members, milestones and recurring tasks, delete tasks, import CSV, see everyone's timesheet |
-| **admin** | Manager + manage users and roles, define custom project fields, delete projects, read the audit log |
+| **manager** | Member + everything in *any* project: create and edit projects, manage members, milestones and recurring tasks, delete tasks, import CSV, see everyone's timesheet, approve timesheets |
+| **admin** | Manager + manage users and roles, define custom project fields, delete projects, reopen approved timesheets, read the audit log |
 
 Project membership also controls who can be *assigned* work. Archived projects are read-only for all roles.
 The server is the authority: the UI hides controls a role cannot use, but every rule is enforced in the API.
@@ -384,7 +401,7 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~760 tests, no dependencies
+python -m unittest discover -s tests -v     # ~800 tests, no dependencies
 pip install playwright && playwright install chromium
 python -m unittest discover -s tests -p "test_ui_*.py" -v   # 38 real-browser tests (skipped automatically without Playwright)
 ```
@@ -405,7 +422,7 @@ tests/                 unit, HTTP, CLI and browser tests
 ## Limitations and ideas for later
 
 Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), task templates or
-attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; API tokens, sprints and project templates are managed through the API (tokens also the command line) with no screen yet, sprints are sized in hours rather than points, and the primary token cannot be given an expiry; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; API tokens, sprints, project templates and timesheet approval are managed through the API (tokens also the command line) with no screen yet, sprints are sized in hours rather than points, and the primary token cannot be given an expiry; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
