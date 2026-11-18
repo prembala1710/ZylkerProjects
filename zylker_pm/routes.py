@@ -450,4 +450,4 @@ def report_digest(ctx, req):
     return reports.digest(ctx, req.query)
 
 
-from . import webhook_routes  # noqa: E402,F401 - registers the /api/webhooks endpoints
+from . import search_routes, webhook_routes  # noqa: E402,F401 - register the /api/search and /api/webhooks endpoints

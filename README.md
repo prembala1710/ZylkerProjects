@@ -29,6 +29,7 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **Brute-force protection and rate limits** - failed sign-ins block the address with growing waits, and each user has a request budget; both
   answer `429` with `Retry-After` (see [Throttling](#throttling)).
 - **Webhooks** - signed, retried, logged event delivery to other systems (chat, CI, your own service) with protection against calls to internal addresses (see [Webhooks](#webhooks)).
+- **Search** - one box for tasks, comments and projects: ranked, stemmed, with phrases, `OR`, exclusions and filters such as `status:open assignee:me`, highlighted snippets and a jump-to-key shortcut (see [Search](#search)).
 - **Recurring tasks** - "every other Monday", "the last day of each month": managers define a schedule and a task template, the system creates the
   tasks on time without ever duplicating or flooding (see [Recurring tasks](#recurring-tasks)).
 
@@ -55,6 +56,7 @@ The same commands are available as `zylker-pm ...` after `pip install .`. Everyt
 | `zylker-pm digest [--days 3] [--project KEY] [--post]` | Print the overdue / due-soon digest; `--post` sends it to Cliq |
 | `zylker-pm recur-run [--project KEY] [--dry-run]` | Create the recurring tasks that are due (safe to run from cron as often as you like) |
 | `zylker-pm webhook-run [--limit N]` | Deliver the queued webhooks that are due, retries included (for installations that run `serve` with the delivery loop off) |
+| `zylker-pm search-rebuild` | Rebuild the full-text search index from the data (and move a database onto FTS5 if it had fallen back to substring search) |
 | `zylker-pm backup FILE [--force]` | Write a consistent copy of the database (safe while the server runs) |
 | `zylker-pm import-csv FILE --project KEY --as USER [--dry-run] [--add-missing-members]` | Import tasks; exit code 3 means "finished, but some rows had errors" |
 | `zylker-pm seed-demo` | Load fictional sample data (refuses unless there are no projects) |
@@ -163,6 +165,17 @@ Tell other systems when something happens. An administrator registers a URL with
 
 Webhook events are not themselves delivered (no loops). The secret is stored in the database because it is needed to sign; protect backups as you would the database. Delivery state lives in the database, so
 several `serve` processes or a `webhook-run` cron job can share the work without sending anything twice.
+
+## Search
+
+`GET /api/search?q=...` searches tasks, comments and projects at once and returns ranked results with highlighted snippets.
+
+- **A small query language.** `login crash` (all words, stemmed), `"login page"` (phrase), `log*` (prefix), `login OR signin`, `login -safari` (exclude), and filters: `project:WEB status:open assignee:me priority:high type:bug label:auth is:closed in:comment`. Filters on their own list matching tasks, newest change first. Typing a task key such as `WEB-12` goes straight to it.
+- **Safe by construction.** Every word is quoted before it reaches the search engine, so nothing a user types can be search syntax (or SQL); highlights come back as plain `{text, match}` segments, never markup.
+- **Always current.** The index is kept by database triggers, in the same transaction as the change: CSV imports, recurring tasks and the CLI are covered as much as the API, a rolled-back change never shows up, deletes clean up after themselves. `GET /api/search/status` (admin) says whether the index matches the data; `POST /api/search/reindex` or `zylker-pm search-rebuild` repairs it.
+- **Works without FTS5.** If the SQLite behind your Python lacks FTS5 the database falls back to case-insensitive substring search with the same filters and result shape (no stemming, cruder ranking).
+
+Everyone who is signed in can search. The full syntax and the result format are in [docs/API.md](docs/API.md#search).
 
 ## Recurring tasks
 
@@ -313,7 +326,7 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~475 tests, no dependencies
+python -m unittest discover -s tests -v     # ~560 tests, no dependencies
 pip install playwright && playwright install chromium
 python -m unittest discover -s tests -p "test_ui_*.py" -v   # 38 real-browser tests (skipped automatically without Playwright)
 ```
@@ -334,7 +347,7 @@ tests/                 unit, HTTP, CLI and browser tests
 ## Limitations and ideas for later
 
 Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), task templates or
-attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
