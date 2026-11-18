@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Added in schema v2. Shared by fresh databases (SCHEMA) and the v1 -> v2 migration so the two can never drift.
 PROJECT_FIELDS_SCHEMA = """
@@ -383,9 +383,45 @@ CREATE TABLE project_templates (
 );
 """
 
+# Added in schema v10: timesheet approval. A person's week (Monday to Sunday) has no row until it is first submitted;
+# a row then records where the week stands (submitted, approved, rejected, withdrawn or reopened), a digest of the
+# time entries that were submitted (so an approved week can be shown to be unchanged), and who decided what. The
+# per-sheet event table is the history of every submit, decision, withdrawal and reopening.
+TIMESHEET_SCHEMA = """
+CREATE TABLE timesheets (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    week_start TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('submitted','approved','rejected','withdrawn','reopened')),
+    total_hours REAL NOT NULL,
+    entry_count INTEGER NOT NULL,
+    digest TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 1,
+    submitted_at TEXT NOT NULL,
+    decided_by INTEGER REFERENCES users(id),
+    decided_at TEXT,
+    decision_note TEXT NOT NULL DEFAULT '',
+    UNIQUE (user_id, week_start)
+);
+CREATE INDEX idx_timesheets_status ON timesheets (status, week_start);
+
+CREATE TABLE timesheet_events (
+    id INTEGER PRIMARY KEY,
+    timesheet_id INTEGER NOT NULL REFERENCES timesheets(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    actor_id INTEGER REFERENCES users(id),
+    revision INTEGER NOT NULL,
+    hours REAL NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_timesheet_events_sheet ON timesheet_events (timesheet_id, id);
+"""
+
 # Each entry upgrades a database from version N to N + 1, inside one transaction. A new database is created
 # as version 1 and then walked through every migration, so a fresh install and an upgrade cannot differ.
-MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration, 6: API_TOKEN_SCHEMA, 7: SPRINT_SCHEMA, 8: TEMPLATE_SCHEMA}
+MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration, 6: API_TOKEN_SCHEMA, 7: SPRINT_SCHEMA, 8: TEMPLATE_SCHEMA, 9: TIMESHEET_SCHEMA}
 
 SCHEMA = """
 CREATE TABLE users (
