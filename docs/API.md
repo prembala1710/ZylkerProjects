@@ -317,8 +317,8 @@ Filters (`name:value`, several values with commas mean "any of"; different filte
 |---|---|---|
 | `project:` | project keys | `project:web,ops` |
 | `in:` | `task`, `comment`, `project` | restricts what kind of result you get (plurals accepted) |
-| `status:` | `todo`, `in_progress`, `in_review`, `blocked`, `done`, `cancelled` | |
-| `is:` | `open`, `closed` | shorthand for the open or closed statuses; combines with `status:` |
+| `status:` | `todo`, `in_progress`, `in_review`, `blocked`, `done`, `cancelled`, or `open` / `closed` for the whole group | `status:open,done` |
+| `is:` | `open`, `closed` | the same as `status:open` / `status:closed`; combines with `status:` |
 | `priority:` | `low`, `medium`, `high`, `critical` | |
 | `type:` | `task`, `bug`, `story`, `epic` | |
 | `assignee:` | user name, `me`, `none` | |
