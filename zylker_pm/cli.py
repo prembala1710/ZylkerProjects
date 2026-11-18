@@ -19,7 +19,7 @@ from .config import LOOPBACK_HOSTS, Config
 from .db import connect, init_db
 from .domain import ROLES
 from .errors import ApiError
-from .services import csvio, recurrence, reports, users, webhooks
+from .services import csvio, recurrence, reports, search, users, webhooks
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -183,6 +183,13 @@ def _webhook_loop(cfg, sender, seconds, stop):
             log.exception("webhook delivery pass failed")
 
 
+def cmd_search_rebuild(args, cfg):
+    """Rebuild the search index from the data (and move a substring-engine database onto FTS5 when possible)."""
+    init_db(cfg.db_path)
+    print(json.dumps(search.rebuild_database(cfg.db_path), indent=2))
+    return 0
+
+
 def cmd_backup(args, cfg):
     import os
 
@@ -269,6 +276,9 @@ def build_parser():
     p = sub.add_parser("webhook-run", help="deliver the queued webhooks that are due (retries included)")
     p.add_argument("--limit", type=int, default=100, help="most deliveries to attempt in this run")
     p.set_defaults(fn=cmd_webhook_run)
+
+    p = sub.add_parser("search-rebuild", help="rebuild the full-text search index from the data")
+    p.set_defaults(fn=cmd_search_rebuild)
 
     p = sub.add_parser("backup", help="write a consistent copy of the database")
     p.add_argument("path")
