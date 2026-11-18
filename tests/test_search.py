@@ -122,6 +122,14 @@ class Behaviour(Corpus):
         self.assertEqual(self.tasks("certificate is:closed"), ["OPS-1"])
         self.assertEqual(self.tasks("certificate is:open"), [])
 
+    def test_open_and_closed_work_as_statuses_too(self):
+        self.assertEqual(self.tasks("status:open"), ["WEB-1", "WEB-2", "WEB-3", "WEB-4"])
+        self.assertEqual(self.tasks("status:closed"), ["OPS-1"])
+        self.assertEqual(self.tasks("status:open"), self.tasks("is:open"))
+        self.assertEqual(self.tasks("log* status:open,done"), ["WEB-1", "WEB-2"])
+        self.assertEqual(self.tasks("status:OPEN,Done"), ["OPS-1", "WEB-1", "WEB-2", "WEB-3", "WEB-4"])
+        self.assertEqual(self.find("status:open")["interpreted"]["filters"], {"status": ["todo", "in_progress", "in_review", "blocked"]})
+
     def test_a_comment_follows_the_filters_of_its_task(self):
         found = set(self.hits("safari status:todo"))
         self.assertEqual(found, {("task", "WEB-1"), ("comment", "WEB-1")})
