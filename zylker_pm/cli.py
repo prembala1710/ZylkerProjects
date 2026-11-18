@@ -19,7 +19,7 @@ from .config import LOOPBACK_HOSTS, Config
 from .db import connect, init_db
 from .domain import ROLES
 from .errors import ApiError
-from .services import csvio, recurrence, reports, search, users, webhooks
+from .services import csvio, recurrence, reports, search, tokens, users, webhooks
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -113,6 +113,53 @@ def cmd_rotate_token(args, cfg):
             return 1
         token = users.rotate_token(ctx, user["id"])
     _show_token(args.username, token)
+    return 0
+
+
+def cmd_create_token(args, cfg):
+    """Mint an API token for a user (for example a service account) without needing their primary token."""
+    app = App(cfg)
+    body = {"name": args.name, "expires_in_days": args.days}
+    if args.role_cap:
+        body["role_cap"] = args.role_cap
+    if args.read_only:
+        body["read_only"] = True
+    if args.ip:
+        body["allowed_ips"] = args.ip
+    with app.session() as ctx:
+        owner = users.find_by_username(ctx.conn, args.username)
+        if owner is None:
+            print("No such user: %s" % args.username, file=sys.stderr)
+            return 1
+        made = tokens.create_token(ctx, body, owner=owner)
+    print("Created API token %r for %r (role %s%s, expires %s)." % (
+        made["name"], made["user"], made["role_cap"], ", read-only" if made["read_only"] else "", made["expires_at"]))  # fmt: skip
+    print("Shown once - store it somewhere safe:\n  %s" % made["token"])
+    return 0
+
+
+def cmd_list_tokens(args, cfg):
+    app = App(cfg)
+    with app.session(write=False) as ctx:
+        items = tokens.list_tokens(ctx, {"user": args.username or "*", "status": args.status or ""})["items"]
+    if not items:
+        print("No tokens.")
+        return 0
+    for t in items:
+        print("%-4d %-8s %-24s %-14s %-10s %s%s" % (
+            t["id"], t["status"], t["name"], t["hint"], t["role_cap"] + ("/ro" if t["read_only"] else ""), t["user"],
+            ", expires " + t["expires_at"] if t["status"] == "active" else ""))  # fmt: skip
+    return 0
+
+
+def cmd_revoke_tokens(args, cfg):
+    app = App(cfg)
+    with app.session() as ctx:
+        if users.find_by_username(ctx.conn, args.username) is None:
+            print("No such user: %s" % args.username, file=sys.stderr)
+            return 1
+        done = tokens.revoke_all(ctx, args.username)
+    print("Revoked %d API token(s) of %r. Their primary token is unchanged (use rotate-token to replace it)." % (done["revoked"], args.username))
     return 0
 
 
@@ -226,9 +273,9 @@ def cmd_seed_demo(args, cfg):
     from .seed import seed_demo
 
     init_db(cfg.db_path)
-    tokens = seed_demo(App(cfg))
+    issued = seed_demo(App(cfg))
     print("Demo data created (clearly fictional: users, projects and tasks for trying the UI).")
-    for username, token in tokens.items():
+    for username, token in issued.items():
         _show_token(username, token)
     return 0
 
@@ -261,6 +308,24 @@ def build_parser():
     p = sub.add_parser("rotate-token", help="issue a new API token for a user (invalidates the old one)")
     p.add_argument("username")
     p.set_defaults(fn=cmd_rotate_token)
+
+    p = sub.add_parser("create-token", help="create an expiring, restricted API token for a user and print it once")
+    p.add_argument("username")
+    p.add_argument("--name", required=True, help="what the token is for, e.g. ci-nightly")
+    p.add_argument("--days", type=int, default=tokens.DEFAULT_DAYS, help="valid for this many days (1-365, default %(default)s)")
+    p.add_argument("--role-cap", choices=ROLES, help="most the token may do (default: the user's own role)")
+    p.add_argument("--read-only", action="store_true", help="refuse every request that is not GET or HEAD")
+    p.add_argument("--ip", action="append", metavar="CIDR", help="only accept the token from this address or network (repeatable)")
+    p.set_defaults(fn=cmd_create_token)
+
+    p = sub.add_parser("list-tokens", help="list API tokens (all users unless one is named)")
+    p.add_argument("username", nargs="?")
+    p.add_argument("--status", help="comma-separated: active, expired, revoked")
+    p.set_defaults(fn=cmd_list_tokens)
+
+    p = sub.add_parser("revoke-tokens", help="revoke every active API token of a user")
+    p.add_argument("username")
+    p.set_defaults(fn=cmd_revoke_tokens)
 
     p = sub.add_parser("digest", help="print (and optionally post to Cliq) overdue / due-soon tasks")
     p.add_argument("--days", type=int, default=3)

@@ -38,6 +38,7 @@ log = logging.getLogger("zylker.access")
 
 SESSION_GAP_SECONDS = 1800  # a user's next request after this much quiet is recorded as a new session
 MAX_TRACKED_USERS = 10_000
+TOKEN_USE_FLUSH_SECONDS = 60  # an API token's "last used" is written at most this often, so reads stay write-free
 
 STATIC_DIR = Path(__file__).parent / "static"
 # Only these paths are ever served from disk - there is no path-based file lookup.
@@ -199,8 +200,10 @@ class App:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.notifier = notifier if notifier is not None else notify.build_notifier(config)
         self.throttle = Throttle(config.auth_failure_limit, config.rate_limit_per_minute)
-        self._seen = {}  # user id -> when we last recorded that user's session; keeps the hot path free of DB writes
+        self._seen = {}  # session key -> when we last recorded that session; keeps the hot path free of DB writes
         self._seen_lock = threading.Lock()
+        self._token_flushed = {}  # API token id -> when its usage was last written
+        self._token_pending = {}  # API token id -> uses counted since then
 
     # -- helpers shared by the CLI and tests -------------------------------------------
 
@@ -238,10 +241,15 @@ class App:
     def _audit_refusal(self, info, exc):
         """401 (bad or missing token) and 403 (not allowed) are the events an administrator watches for."""
         if exc.status == 401:
+            reason = exc.code if exc.code in auth.REASONS else ("invalid_token" if info.had_token else "missing_token")
+            known = getattr(exc, "audit", None) or {}  # whose API token it was, when it was one that exists
             self._audit_write(
-                "auth.failed", info,
-                details={"reason": "invalid_token" if info.had_token else "missing_token", "method": info.method, "path": audit.clean(info.path), "user_agent": info.user_agent},
-                merge_on=("reason",),
+                "auth.failed", info, actor_id=known.get("actor_id"),
+                details={
+                    "reason": reason, "method": info.method, "path": audit.clean(info.path), "user_agent": info.user_agent,
+                    **known.get("details", {}),
+                },
+                merge_on=("reason", "token"),
             )  # fmt: skip
         elif exc.status == 429:
             self._audit_throttle(info, exc)
@@ -275,15 +283,51 @@ class App:
             self._audit_write(action, info, actor_id=user["id"] if user is not None else None, details=details)
         if user is None:
             return
+        tok = auth.token_of(user)
+        key = auth.rate_key(user)  # a session is per credential: an integration's start is not its owner's
         now = self.clock()
         with self._seen_lock:
-            last = self._seen.get(user["id"])
+            last = self._seen.get(key)
             if last is not None and (now - last).total_seconds() < SESSION_GAP_SECONDS:
                 return
             if len(self._seen) >= MAX_TRACKED_USERS:
                 self._seen.clear()
-            self._seen[user["id"]] = now
-        self._audit_write("auth.session_started", info, actor_id=user["id"], details={"user_agent": info.user_agent})
+            self._seen[key] = now
+        details = {"user_agent": info.user_agent}
+        if tok:
+            details["token"] = tok["name"]
+        self._audit_write("auth.session_started", info, actor_id=user["id"], details=details)
+
+    def _note_token_use(self, info):
+        """Remember that an API token was used. Requests are counted in memory and written - on a connection of their
+        own, after the request - at most once a minute per token, so a busy integration does not turn every read into
+        a write. Counts of the last minute before a quiet spell or a restart can be missing."""
+        tok = auth.token_of(info.user)
+        now = self.clock()
+        with self._seen_lock:
+            pending = self._token_pending.get(tok["id"], 0) + 1
+            last = self._token_flushed.get(tok["id"])
+            if last is not None and (now - last).total_seconds() < TOKEN_USE_FLUSH_SECONDS:
+                if len(self._token_pending) >= MAX_TRACKED_USERS:
+                    self._token_pending.clear()
+                self._token_pending[tok["id"]] = pending
+                return
+            if len(self._token_flushed) >= MAX_TRACKED_USERS:
+                self._token_flushed.clear()
+            self._token_flushed[tok["id"]] = now
+            self._token_pending.pop(tok["id"], None)
+        try:
+            conn = connect(self.config.db_path)
+            try:
+                with transaction(conn, write=True):
+                    conn.execute(
+                        "UPDATE api_tokens SET last_used_at = ?, last_used_ip = ?, use_count = use_count + ? WHERE id = ?",
+                        (iso(now), info.ip, pending, tok["id"]),
+                    )
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            log.warning("could not record the use of API token %s [%s]", tok["id"], info.id, exc_info=True)
 
     # -- throttling --------------------------------------------------------------------
 
@@ -304,7 +348,7 @@ class App:
             )  # fmt: skip
 
     def _charge_request(self, info, user):
-        allowed, wait, limit, remaining = self.throttle.take(user["id"], self.clock().timestamp())
+        allowed, wait, limit, remaining = self.throttle.take(auth.rate_key(user), self.clock().timestamp())
         if not limit:
             return
         info.rate = (limit, remaining)
@@ -331,6 +375,8 @@ class App:
             status, headers, body = self.json_response(
                 500, {"error": {"code": "internal_error", "message": "Internal server error", "request_id": info.id}}
             )
+        if info.user is not None and auth.token_of(info.user) is not None:
+            self._note_token_use(info)
         if method == "HEAD":
             body = b""
         if info.rate is not None:
@@ -376,12 +422,15 @@ class App:
             user = None
             if not r.public:
                 try:
-                    user = auth.authenticate(conn, req.authorization)
+                    user = auth.authenticate(conn, req.authorization, now=self.clock(), ip=info.ip)
                 except Unauthorized:
                     self._on_auth_failure(info)
                     raise
                 info.user = user
                 self._charge_request(info, user)
+                tok = auth.token_of(user)
+                if tok and tok["read_only"] and req.method not in ("GET", "HEAD"):
+                    raise Forbidden("This API token is read-only", code="token_read_only")
                 if ROLE_RANK[user["role"]] < ROLE_RANK[r.role]:
                     raise Forbidden(
                         "This action requires the %r role or higher (you are %r)" % (r.role, user["role"]),

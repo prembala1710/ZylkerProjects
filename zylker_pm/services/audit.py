@@ -38,6 +38,7 @@ CATEGORIES = {
     "system": "System",
     "audit": "Audit log",
     "webhook": "Webhooks",
+    "token": "API tokens",
 }
 SEVERITIES = ("info", "notice", "warning", "error")
 
@@ -61,6 +62,9 @@ ACTION_SEVERITY = {
     "webhook.disabled": "warning",
     "webhook.deleted": "notice",
     "webhook.secret_rotated": "notice",
+    "token.created": "notice",
+    "token.revoked": "notice",
+    "token.revoked_all": "notice",
 }
 
 MERGE_WINDOW_SECONDS = 300  # repeats of the same security event inside this window become one counted row
