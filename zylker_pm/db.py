@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Added in schema v2. Shared by fresh databases (SCHEMA) and the v1 -> v2 migration so the two can never drift.
 PROJECT_FIELDS_SCHEMA = """
@@ -291,9 +291,35 @@ def search_migration() -> str:
     return _SEARCH_META % "like"
 
 
+# Added in schema v7: API tokens. A user can hold several, each with its own name, expiry, role cap, read-only flag
+# and optional address allow-list; only the SHA-256 of the token is stored. The users.token_hash column stays the
+# user's primary token (full powers, no expiry); these are the narrower, expiring credentials for integrations.
+API_TOKEN_SCHEMA = """
+CREATE TABLE api_tokens (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    hint TEXT NOT NULL,
+    role_cap TEXT NOT NULL CHECK (role_cap IN ('viewer','member','manager','admin')),
+    read_only INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0,1)),
+    allowed_ips TEXT NOT NULL DEFAULT '[]',
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_used_at TEXT,
+    last_used_ip TEXT,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    revoked_at TEXT,
+    revoked_by INTEGER REFERENCES users(id)
+);
+CREATE INDEX idx_api_tokens_user ON api_tokens (user_id, id);
+"""
+
+
 # Each entry upgrades a database from version N to N + 1, inside one transaction. A new database is created
 # as version 1 and then walked through every migration, so a fresh install and an upgrade cannot differ.
-MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration}
+MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration, 6: API_TOKEN_SCHEMA}
 
 SCHEMA = """
 CREATE TABLE users (
