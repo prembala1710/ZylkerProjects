@@ -152,7 +152,14 @@ def _normalise_filters(ctx, filters):
         out["type"] = pick("type", TASK_TYPES)
     if "priority" in filters:
         out["priority"] = pick("priority", PRIORITIES)
-    statuses = pick("status", STATUSES) if "status" in filters else []
+    statuses = []
+    for v in filters.get("status", []):  # "open" and "closed" are shortcuts for the whole group, like is:open / is:closed
+        low = v.lower()
+        group = OPEN_STATUSES if low == "open" else CLOSED_STATUSES if low == "closed" else (low,)
+        if group == (low,) and low not in STATUSES:
+            errors.append("status:%s is not valid (use %s, open or closed)" % (low, ", ".join(STATUSES)))
+        else:
+            statuses += [x for x in group if x not in statuses]
     if "is" in filters:
         for v in pick("is", ("open", "closed")):
             statuses += [s for s in (OPEN_STATUSES if v == "open" else CLOSED_STATUSES) if s not in statuses]
