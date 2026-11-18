@@ -32,6 +32,8 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **Search** - one box for tasks, comments and projects: ranked, stemmed, with phrases, `OR`, exclusions and filters such as `status:open assignee:me`, highlighted snippets and a jump-to-key shortcut (see [Search](#search)).
 - **Recurring tasks** - "every other Monday", "the last day of each month": managers define a schedule and a task template, the system creates the
   tasks on time without ever duplicating or flooding (see [Recurring tasks](#recurring-tasks)).
+- **Scoped, expiring API tokens** - credentials for scripts and integrations that expire, can be capped to a lower role, made read-only or limited to
+  certain addresses, and can be revoked at any time (see [API tokens](#api-tokens)).
 
 ## Quick start
 
@@ -53,6 +55,9 @@ The same commands are available as `zylker-pm ...` after `pip install .`. Everyt
 | `zylker-pm serve [--host H --port P]` | Run the web UI and API (threaded; logs one line per request, never headers or tokens) |
 | `zylker-pm create-user USER --role member --name "..." [--capacity 30]` | Add a person and print their token |
 | `zylker-pm rotate-token USER` | Issue a new token; the old one stops working immediately |
+| `zylker-pm create-token USER --name N [--days 30] [--role-cap ROLE] [--read-only] [--ip CIDR ...]` | Mint an expiring, restricted [API token](#api-tokens) for a user (for example a service account) and print it once |
+| `zylker-pm list-tokens [USER] [--status active,expired,revoked]` | List API tokens (never their values), everyone's unless a user is named |
+| `zylker-pm revoke-tokens USER` | Revoke every active API token of a user (their primary token is unchanged) |
 | `zylker-pm digest [--days 3] [--project KEY] [--post]` | Print the overdue / due-soon digest; `--post` sends it to Cliq |
 | `zylker-pm recur-run [--project KEY] [--dry-run]` | Create the recurring tasks that are due (safe to run from cron as often as you like) |
 | `zylker-pm webhook-run [--limit N]` | Deliver the queued webhooks that are due, retries included (for installations that run `serve` with the delivery loop off) |
@@ -143,7 +148,7 @@ The server defends itself against guessing and runaway clients; nothing needs co
 - **Guessing tokens.** Tokens are 256 random bits, so guessing is hopeless, but hammering is still noise and load. Ten failed sign-ins from one address
   in five minutes block that address for a minute; each repeat doubles the wait (up to an hour). Requests with a **valid** token are still served from a
   blocked address, so a shared office address is not locked out by one person's typo.
-- **Runaway clients.** Each user has a budget of 600 requests a minute (with a burst of 120). Past it they get `429` and a `Retry-After`; responses carry
+- **Runaway clients.** Each user - and each [API token](#api-tokens), separately - has a budget of 600 requests a minute (with a burst of 120). Past it they get `429` and a `Retry-After`; responses carry
   `X-RateLimit-Limit` and `X-RateLimit-Remaining`. The page itself and `GET /api/health` are never limited.
 - **Visible.** Blocks and refusals appear in the [audit log](#audit-log) (`auth.throttled`, warnings, with repeats merged), the audit summary counts them, and
   admins can list or lift blocks with `GET` / `DELETE /api/security/blocks`.
@@ -196,6 +201,26 @@ For work that comes round again - the weekly report, the month-end close, the qu
   log under *Recurring tasks*. Deleting a rule keeps the tasks it made.
 
 Day boundaries follow `ZYLKER_TIMEZONE`. Reference: [docs/API.md](docs/API.md#recurring-tasks).
+
+## API tokens
+
+The token you were given when your account was created is *you*: every power of your role, no expiry. Do not hand it to scripts. Mint an **API token** instead
+(`POST /api/tokens`; an administrator can also run `zylker-pm create-token USER --name ci-nightly --days 30` for a service account):
+
+- **It expires.** 1-365 days, 30 by default. After that it answers `401 token_expired`; there is no "forever".
+- **Never more than its owner.** A token can be capped to a lower role (`role_cap`: a `member` token for a manager's script). It acts with the lower of the cap and
+  the owner's *current* role, so demoting the owner demotes the token, and promoting the owner does not widen it.
+- **Read-only** tokens refuse everything but `GET` and `HEAD` (`403 token_read_only`): for dashboards and reports.
+- **Address allow-list.** Up to ten addresses or networks such as `203.0.113.0/24`; from anywhere else the answer is `401 token_ip_not_allowed`.
+- **It cannot breed.** An API token cannot create, list or revoke tokens, nor rotate the primary token (`403 primary_token_required`): a leaked key can neither
+  mint its own successor nor lock its owner out.
+- **Revocable and visible.** Revoke one token or all of them at once (`DELETE /api/tokens`, `zylker-pm revoke-tokens`); deactivating the user disables every one. The
+  listing shows when and from where each was last used. Creation, revocation and every refused use are in the [audit log](#audit-log).
+- **Its own budget.** Each token has its own request budget, so a runaway job cannot starve its owner.
+- **Stored as a hash.** Like primary tokens, only the SHA-256 digest is kept; the value is shown once, with a short `hint` (the last four characters) to tell tokens apart.
+
+Limits: ten active tokens per user; expired and revoked ones stay listed for 30 days. Usage figures are batched (at most one write a minute per token), so they can lag by a minute.
+There is no screen for tokens yet, and the primary token itself still never expires (rotate it with `rotate-token`). Reference: [docs/API.md](docs/API.md#api-tokens).
 
 ## Roles
 
@@ -314,19 +339,19 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
 
 - Authentication is a bearer token per user: 256 random bits, stored only as a SHA-256 hash, shown once, rotatable, and dead the
   moment the user is deactivated. The browser keeps it in `sessionStorage` (gone when the tab closes) unless "Remember me" is ticked,
-  which uses `localStorage`.
+  which uses `localStorage`. Scripts should use [API tokens](#api-tokens) instead: they expire, can be restricted and are revocable.
 - All SQL is parameterised; sort and filter values are validated against whitelists. Request bodies are size-limited and
   content-type checked. Error responses never include stack traces, and tokens are never logged or echoed.
 - The UI builds the DOM with `textContent` only (no `innerHTML` anywhere) and the server sends a strict Content-Security-Policy -
   no inline scripts or styles, no external resources, no framing - so stored text cannot become markup. A browser test submits
   `<script>`/`<img onerror>` payloads in titles, descriptions, comments and project names and checks that none executes.
 - Static files are served from a fixed whitelist of three paths; there is no filesystem lookup from the URL.
-- **Not covered:** single sign-on (Zoho or otherwise), token expiry, failed-login throttling beyond the per-process limits described under [Throttling](#throttling) (keep throttling at the proxy too), e-mail notifications, per-project read restrictions (every signed-in user can read every project), file attachments.
+- **Not covered:** single sign-on (Zoho or otherwise), expiry of the primary token (API tokens do expire), failed-login throttling beyond the per-process limits described under [Throttling](#throttling) (keep throttling at the proxy too), e-mail notifications, per-project read restrictions (every signed-in user can read every project), file attachments.
 
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~560 tests, no dependencies
+python -m unittest discover -s tests -v     # ~640 tests, no dependencies
 pip install playwright && playwright install chromium
 python -m unittest discover -s tests -p "test_ui_*.py" -v   # 38 real-browser tests (skipped automatically without Playwright)
 ```
@@ -347,7 +372,7 @@ tests/                 unit, HTTP, CLI and browser tests
 ## Limitations and ideas for later
 
 Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), task templates or
-attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; API tokens are managed through the API and the command line only (no screen), and the primary token cannot be given an expiry; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
