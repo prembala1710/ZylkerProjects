@@ -143,6 +143,9 @@ def update_user(ctx, user_id, data):
 
 
 def rotate_token(ctx, user_id):
+    if auth.token_of(ctx.user) is not None:
+        # A leaked integration key must not be able to replace (and so lock out) the primary token of its owner.
+        raise Forbidden("The primary token can only be rotated with the primary token", code="primary_token_required")
     target = get_row(ctx.conn, user_id)
     if not (ctx.has_role("admin") or (ctx.user is not None and ctx.user["id"] == target["id"])):
         raise Forbidden("You can only rotate your own token", code="insufficient_role")
