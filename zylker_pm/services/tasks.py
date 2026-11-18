@@ -20,7 +20,7 @@ from ..domain import (
 )
 from ..errors import Conflict, ValidationError
 from ..util import Checker, escape_like, parse_date, parse_task_key, truthy
-from . import activity, graph, projects, taskrefs, users
+from . import activity, graph, projects, taskrefs, timesheets, users
 
 TASK_FIELDS = {
     "title", "description", "type", "status", "priority", "assignee", "parent", "milestone",
@@ -501,6 +501,7 @@ def delete_task(ctx, key, cascade=False):
             code="has_subtasks",
             details={"subtasks": descendants},
         )
+    timesheets.assert_tasks_have_no_locked_time(ctx, [row["id"], *descendant_ids])
     conn.execute("DELETE FROM tasks WHERE id = ?", (row["id"],))
     activity.detach_task(conn, [row["id"], *descendant_ids])  # SQLite may reuse these ids; history must not follow
     activity.log(
