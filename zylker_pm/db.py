@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Added in schema v2. Shared by fresh databases (SCHEMA) and the v1 -> v2 migration so the two can never drift.
 PROJECT_FIELDS_SCHEMA = """
@@ -317,9 +317,52 @@ CREATE INDEX idx_api_tokens_user ON api_tokens (user_id, id);
 """
 
 
+# Added in schema v8: sprints. A sprint is a time-boxed set of tasks of one project. `sprint_items` is the history of
+# which tasks were in it and when they came and went (that is what makes scope change and burndown computable);
+# `outcome` stays NULL while an item is live, which the partial unique index turns into "a task is in at most one
+# live sprint". Only one sprint per project can be active at a time.
+SPRINT_SCHEMA = """
+CREATE TABLE sprints (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL COLLATE NOCASE,
+    goal TEXT NOT NULL DEFAULT '',
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned','active','closed')),
+    committed_hours REAL,
+    committed_count INTEGER,
+    completed_hours REAL,
+    completed_count INTEGER,
+    carried_count INTEGER,
+    dropped_count INTEGER,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    closed_at TEXT,
+    UNIQUE (project_id, name),
+    CHECK (end_date >= start_date)
+);
+CREATE UNIQUE INDEX idx_one_active_sprint ON sprints (project_id) WHERE status = 'active';
+
+CREATE TABLE sprint_items (
+    id INTEGER PRIMARY KEY,
+    sprint_id INTEGER NOT NULL REFERENCES sprints(id) ON DELETE CASCADE,
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    hours REAL NOT NULL DEFAULT 0 CHECK (hours >= 0),
+    added_at TEXT NOT NULL,
+    added_after_start INTEGER NOT NULL DEFAULT 0 CHECK (added_after_start IN (0,1)),
+    left_at TEXT,
+    done_at TEXT,
+    outcome TEXT CHECK (outcome IS NULL OR outcome IN ('done','carried','dropped','removed'))
+);
+CREATE UNIQUE INDEX idx_one_live_sprint_per_task ON sprint_items (task_id) WHERE outcome IS NULL;
+CREATE INDEX idx_sprint_items_sprint ON sprint_items (sprint_id);
+"""
+
 # Each entry upgrades a database from version N to N + 1, inside one transaction. A new database is created
 # as version 1 and then walked through every migration, so a fresh install and an upgrade cannot differ.
-MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration, 6: API_TOKEN_SCHEMA}
+MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration, 6: API_TOKEN_SCHEMA, 7: SPRINT_SCHEMA}
 
 SCHEMA = """
 CREATE TABLE users (
