@@ -210,6 +210,7 @@ Every change to data, by the person who made it, with old and new values - plus 
 | `webhook` | `created`, `updated`, `deleted`, `secret_rotated`, `test`, `redelivered`, `disabled` (see [Webhooks](#webhooks)) | info (`deleted` and `secret_rotated` are notice, `disabled` is warning) |
 | `data` | `exported` (task CSV export, with row count) | notice |
 | `audit` | `exported` (the audit log itself) | notice |
+| `sprint` | `created`, `updated`, `deleted`, `started`, `closed`, `task_added`, `task_removed` (see [Sprints](#sprints)) | info (`deleted` and `closed` are notice) |
 | `system` | `error` (unhandled exception: route and exception *type* only), `search_reindexed` | error, info |
 
 Routine reads are **not** recorded; they would bury the events that matter. Nothing in the log is a token, a request body, a password or an exception
@@ -419,6 +420,59 @@ Highlights are **segments**, never markup: `snippet` and `title_match` are lists
 * **Substring ("like").** Used automatically when the SQLite behind Python has no FTS5, and recorded per database (`engine` in the response and in `/api/search/status`). Case-insensitive substring matching straight on the tables: the same filters, the same result shape, no stemming, ranking by where the words were found (title, then labels, then text). `zylker-pm search-rebuild` moves such a database onto FTS5 once it is available.
 * **Always in step.** On FTS5 the index is maintained by database triggers, so every way of changing data (API, CSV import, recurring tasks, the command line, even raw SQL) is covered, inside the same transaction: a rolled-back change never appears in search, and deleting a task, a project or a comment removes its entries.
 * A database that uses FTS5 is refused on a Python without it, with a message saying so, rather than failing on the first write.
+
+## Sprints
+
+A sprint is a time-boxed set of one project's tasks: planned against the team's capacity, started, measured while it runs and closed, with what was not finished
+either going back to the backlog or into the next sprint. Closed sprints feed a velocity figure and a delivery forecast. Everyone signed in can read; managers
+create, change, start and close sprints; project members (and managers) plan tasks into them. Archived projects are read-only.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/projects/{key}/sprints` | viewer | The project's sprints, newest first, without their task lists. `?status=planned,active,closed` filters |
+| `POST /api/projects/{key}/sprints` | manager | `{name, start_date, end_date, goal?}`. Name 1-60 characters, unique in the project (ignoring case); `YYYY-MM-DD` dates, at most 60 days; may not overlap another sprint that has not closed (`409 sprint_overlap`) |
+| `GET /api/projects/{key}/backlog` | viewer | Open leaf tasks that no live sprint holds, most urgent first, with their total hours and how many have no estimate |
+| `GET /api/projects/{key}/velocity` | viewer | Closed-sprint history, average velocity and the forecast ([below](#velocity-and-forecast)). `?sprints=1..20` (default 6) |
+| `GET /api/sprints/{sprint_id}` | viewer | One sprint with its `items` (the tasks, with how and when each came and went) and, until it closes, its capacity `plan` |
+| `PATCH /api/sprints/{sprint_id}` | manager | Planned: `name`, `goal`, `start_date`, `end_date`. Active: `name`, `goal`, `end_date` (not before today). Closed: `409 sprint_closed` |
+| `DELETE /api/sprints/{sprint_id}` | manager | Only a sprint that has not started (`409 sprint_not_deletable`). Its tasks are untouched and free again |
+| `POST /api/sprints/{sprint_id}/start` | manager | Fixes the commitment. See *Lifecycle* |
+| `POST /api/sprints/{sprint_id}/close` | manager | `{carry_over?: "backlog" \| "next" \| <planned sprint id>}`, default `"backlog"`. See *Lifecycle* |
+| `POST /api/sprints/{sprint_id}/tasks` | member | `{tasks: ["WEB-1", ...]}` (1-100 keys). All or nothing: the first problem refuses the whole request |
+| `DELETE /api/sprints/{sprint_id}/tasks/{key}` | member | Takes a task out (`404 task_not_in_sprint` if it is not in it). The history keeps it as `removed` |
+| `GET /api/sprints/{sprint_id}/burndown` | viewer | Day by day remaining work of a started sprint (`409 sprint_not_started` before that) |
+
+### Planning rules
+
+* A task is in **at most one live sprint** (`409 task_in_sprint`, naming it); only **open** tasks of the **same project** can be planned (`task_closed`, `task_other_project`).
+* A task and its parent or subtasks are never planned into the same sprint (`409 overlapping_scope`), so the same work is not counted twice. Siblings are independent.
+* A task's size is its `estimate_hours` **when it joined**; later re-estimates do not move the sprint. Tasks without an estimate count as 0 hours and are reported as unestimated.
+* `plan` compares capacity with work: each project member offers `weekly_capacity_hours / 5` per working day (Monday to Friday, in the server's timezone) from the first day - or, once active, from today - to the last, against the hours of
+  their unfinished tasks. It reports `capacity_hours`, `planned_hours`, `utilisation` (`null` without capacity), `overallocated`, the hours that are unassigned and how many tasks have no estimate. Work given to someone with no capacity is overallocated.
+
+### Lifecycle
+
+* **Start** (`planned` -> `active`): needs at least one task, today inside the sprint's dates (`sprint_not_due`, `sprint_expired`) and no other active sprint in the project (`sprint_already_active`). Tasks that were closed while the sprint was being planned are taken out first.
+  The hours and tasks that are in then are the **commitment** (`committed`); everything added later is scope change (`scope.added_hours`, `added_after_start` on the item).
+* **Health** of an active sprint is `on_track`, `at_risk` or `off_track`, with `reasons`: after its last day with work open is `off_track`; more than 20% of the commitment above the ideal line, or more than 25% added after the start, is `at_risk`.
+  The ideal line falls over the **working days from the day the sprint actually started**, so starting late does not make a sprint look behind from the first minute.
+* **Close** (`active` -> `closed`): every live task gets an outcome - `done`, `dropped` (cancelled) or `carried` (anything else) - and the `result` is stored (`completed_hours`, `completed_tasks`, `carried_tasks`, `dropped_tasks`, `completion_rate` = completed / (committed + added)).
+  Carried tasks go back to the backlog, or with `carry_over: "next"` (the earliest planned sprint, `409 no_next_sprint` if there is none) or a sprint id (it must be a planned sprint of the same project, `409 target_not_planned`) into that sprint, re-estimated as they are then. All in one transaction.
+
+### Burndown
+
+`{sprint, from, to, baseline_hours, unestimated_tasks, days: [{date, working_day, ideal, remaining, scope, completed}]}`. `scope` is the hours in the sprint that day (tasks that were taken out stop counting from the day they left),
+`completed` the hours of tasks that were done by the end of that day, `remaining` what is in scope and neither done nor cancelled. Days after today (or after the day a sprint was closed) have `null` for the three measured values; `ideal` is always present and does not move over weekends.
+A task that was done in the sprint and reopened *later* still counts as done in a closed sprint, because the sprint recorded the day; in an active sprint a reopened task is open again for the whole range.
+
+### Velocity and forecast
+
+`{project, sprints, average_velocity, window, forecast, note}`. `sprints` is the closed history (newest end date first): `committed_hours`, `added_hours`, `completed_hours`, the task counts, `completion_rate` and `days`.
+`average_velocity` is the mean of `completed_hours` over the latest 3 closed sprints. The `forecast` (`null` until a sprint with finished work exists) takes the remaining hours - the unfinished work in planned and active sprints plus the backlog -
+and says how many more sprints it needs at that velocity: `expected`, `optimistic` (at the best of the 3) and `pessimistic` (at the worst), each `{sprints, finish_date}`. Sprints are assumed to run back to back, each as long as the recent
+ones, from the first day of the earliest unclosed sprint (or today). `unestimated_tasks` says how much of the backlog the figures cannot see. It is an estimate, not a promise.
+
+Audit events (category `sprint`): `created`, `updated` (with the changes), `deleted` (notice), `started`, `closed` (notice, with the outcome counts), `task_added` and `task_removed` (both attached to the task, so they appear in its history).
 
 ## Tasks
 
