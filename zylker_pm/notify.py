@@ -132,7 +132,23 @@ def render(event: str, p: dict, public_url: str = "") -> str | None:
         return "\U0001f4c1 Project *%s* (%s) moved from %s to %s by %s" % (
             _clean(p["name"]), p["project"], p["old"], p["new"], _clean(p["actor"]),
         )  # fmt: skip
+    if event == "timesheet_submitted":
+        return "\U0001f4dd %s submitted their timesheet for the week of %s (%s h)" % (_clean(p["user"]), p["week"], _hours(p["hours"]))
+    if event == "timesheet_decided":
+        who, week, hours = _clean(p["user"]), p["week"], _hours(p["hours"])
+        if p["decision"] == "approved":
+            return "\u2705 %s approved %s's timesheet for the week of %s (%s h)" % (_clean(p["approver"]), who, week, hours)
+        if p["decision"] == "rejected":
+            return "\u21a9\ufe0f %s sent back %s's timesheet for the week of %s: \u201c%s\u201d" % (_clean(p["approver"]), who, week, _clean(p["note"]))
+        if p["decision"] == "reopened":
+            return "\U0001f513 %s reopened %s's approved timesheet for the week of %s: \u201c%s\u201d" % (_clean(p["approver"]), who, week, _clean(p["note"]))
+    if event == "timesheets_approved":
+        return "\u2705 %s approved %d timesheets (%s h)" % (_clean(p["approver"]), p["count"], _hours(p["hours"]))
     return None
+
+
+def _hours(value) -> str:
+    return ("%.2f" % value).rstrip("0").rstrip(".")
 
 
 def render_digest(report: dict, public_url: str = "") -> str:
