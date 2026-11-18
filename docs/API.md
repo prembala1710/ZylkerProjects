@@ -130,7 +130,7 @@ Every change to data, by the person who made it, with old and new values - plus 
 | `webhook` | `created`, `updated`, `deleted`, `secret_rotated`, `test`, `redelivered`, `disabled` (see [Webhooks](#webhooks)) | info (`deleted` and `secret_rotated` are notice, `disabled` is warning) |
 | `data` | `exported` (task CSV export, with row count) | notice |
 | `audit` | `exported` (the audit log itself) | notice |
-| `system` | `error` (unhandled exception: route and exception *type* only) | error |
+| `system` | `error` (unhandled exception: route and exception *type* only), `search_reindexed` | error, info |
 
 Routine reads are **not** recorded; they would bury the events that matter. Nothing in the log is a token, a request body, a password or an exception
 message. User-agent and path text is stripped of control characters and truncated.
@@ -286,6 +286,59 @@ def verify(secret, headers, raw_body, tolerance=300):
 
 Audit events (category `webhook`): `created`, `updated` (with the changes; URLs appear as host names only), `deleted` (notice), `secret_rotated` (notice), `test`, `redelivered`, and `disabled` (warning, written by the system).
 The secret and the URL's path and query never appear in the audit log.
+
+## Search
+
+One endpoint searches tasks, comments and projects together, ranked by relevance, with highlighted snippets. Everyone who is signed in can search (every signed-in user can already read every project).
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/search` | viewer | `?q=` (required, at most 200 characters) `?limit=` (1-50, default 20) `?offset=` (0-1000). See the query language below |
+| `GET /api/search/status` | admin | `{engine, fts5_available, documents, indexed, problems, in_sync}`: which engine the database uses and, for FTS5, whether the index matches the data (`problems` counts `missing` and `orphaned` rows per kind) |
+| `POST /api/search/reindex` | admin | Rebuilds the index from the data (a repair tool; triggers normally keep it exact). 409 `no_search_index` on the substring engine. Recorded as `system.search_reindexed` |
+
+### Query language
+
+| You type | It means |
+|---|---|
+| `login crash` | every word must match (words are stemmed on FTS5: `crashes` finds `crash`; accents are ignored) |
+| `"login page"` | the exact phrase |
+| `log*` | a prefix |
+| `login OR signin` | either word (`OR` in capitals; it joins the words on both sides) |
+| `login -safari` / `-"bad phrase"` | exclude a word or phrase |
+| `WEB-12` | a task key goes straight to that task (marked `exact_key: true`, always first) |
+| `status:open` and other filters | see below; filters alone list matching tasks, most recently changed first, with `score: null` |
+
+Words never act as search syntax: `AND`, `NEAR`, quotes, brackets and `*` typed inside a word are plain text. A query needs at least one word or one filter, and at most 16 words and phrases (otherwise 422).
+
+Filters (`name:value`, several values with commas mean "any of"; different filters combine with "and"; a filter name that is not in this list is just text):
+
+| Filter | Values | Notes |
+|---|---|---|
+| `project:` | project keys | `project:web,ops` |
+| `in:` | `task`, `comment`, `project` | restricts what kind of result you get (plurals accepted) |
+| `status:` | `todo`, `in_progress`, `in_review`, `blocked`, `done`, `cancelled` | |
+| `is:` | `open`, `closed` | shorthand for the open or closed statuses; combines with `status:` |
+| `priority:` | `low`, `medium`, `high`, `critical` | |
+| `type:` | `task`, `bug`, `story`, `epic` | |
+| `assignee:` | user name, `me`, `none` | |
+| `reporter:` | user name, `me` | |
+| `label:` | label names | |
+
+Filters about a task (`status`, `priority`, `type`, `assignee`, `reporter`, `label`) leave projects out of the results, and a comment follows the filters of the task it belongs to. A filter value that is not valid is a 422 whose `details.q` lists every problem at once; negating a filter (`-status:done`) is refused.
+
+### Result
+
+`{query, engine, interpreted, total, total_capped, limit, offset, items}`. `interpreted` echoes how the query was understood (`all_of`: a list of groups, each an "or" of words; `none_of`; `filters` after normalisation). `total` is exact up to 1,000, then `total_capped: true`. Each item has `type` (`task`, `comment`, `project`), `key` (the task key, or the project key), `title`, `project`, `score` (higher is better), `matched_in` (a subset of `title`, `labels`, `body`) and `snippet`; tasks add `status`, `priority`, `assignee`, comments add `comment_id`, `author`, `created_at`, and tasks and projects add `title_match`.
+
+Highlights are **segments**, never markup: `snippet` and `title_match` are lists of `{"text": "...", "match": true|false}`; show them as text and emphasise the matching ones.
+
+### Ranking and engines
+
+* **FTS5 (normal).** BM25 relevance with the title weighted above labels above text. Snippets come from the index.
+* **Substring ("like").** Used automatically when the SQLite behind Python has no FTS5, and recorded per database (`engine` in the response and in `/api/search/status`). Case-insensitive substring matching straight on the tables: the same filters, the same result shape, no stemming, ranking by where the words were found (title, then labels, then text). `zylker-pm search-rebuild` moves such a database onto FTS5 once it is available.
+* **Always in step.** On FTS5 the index is maintained by database triggers, so every way of changing data (API, CSV import, recurring tasks, the command line, even raw SQL) is covered, inside the same transaction: a rolled-back change never appears in search, and deleting a task, a project or a comment removes its entries.
+* A database that uses FTS5 is refused on a Python without it, with a message saying so, rather than failing on the first write.
 
 ## Tasks
 
