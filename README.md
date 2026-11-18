@@ -32,6 +32,8 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **Search** - one box for tasks, comments and projects: ranked, stemmed, with phrases, `OR`, exclusions and filters such as `status:open assignee:me`, highlighted snippets and a jump-to-key shortcut (see [Search](#search)).
 - **Recurring tasks** - "every other Monday", "the last day of each month": managers define a schedule and a task template, the system creates the
   tasks on time without ever duplicating or flooding (see [Recurring tasks](#recurring-tasks)).
+- **Sprints** - time-boxed iterations: plan tasks against each person's capacity, start (the commitment is fixed), watch scope change and a burndown with a
+  working-day ideal line, close with unfinished work carried over, and get velocity and a delivery forecast from the sprints that have closed (see [Sprints](#sprints)).
 - **Scoped, expiring API tokens** - credentials for scripts and integrations that expire, can be capped to a lower role, made read-only or limited to
   certain addresses, and can be revoked at any time (see [API tokens](#api-tokens)).
 
@@ -222,6 +224,20 @@ The token you were given when your account was created is *you*: every power of 
 Limits: ten active tokens per user; expired and revoked ones stay listed for 30 days. Usage figures are batched (at most one write a minute per token), so they can lag by a minute.
 There is no screen for tokens yet, and the primary token itself still never expires (rotate it with `rotate-token`). Reference: [docs/API.md](docs/API.md#api-tokens).
 
+## Sprints
+
+A manager creates a sprint for a project (`POST /api/projects/{key}/sprints`: a name, two dates, optionally a goal); project members plan tasks into it.
+
+- **Planned against capacity.** For every project member the sprint shows hours of capacity (weekly capacity per working day, Monday to Friday) against the hours of their planned tasks, who is overallocated, and how much work is unassigned or unestimated.
+- **Never counted twice.** A task is in one live sprint at a time, only open tasks of the same project can join, and a task and its parent or subtask cannot be in the same sprint.
+- **A commitment, then scope change.** Starting a sprint fixes what was committed. Tasks added or removed afterwards are recorded with the time, so the sprint can say how much it grew, and a sprint that grows by more than a quarter is flagged *at risk*.
+- **Burndown that is honest about time.** Remaining work per day, with an ideal line over the working days from the day the sprint really started and a scope line that moves when work is added or taken out.
+- **Closing decides every task.** Done, dropped (cancelled) or carried. Carried work goes back to the backlog, or into the next planned sprint (or a chosen one), re-estimated, all in one transaction.
+- **Velocity and forecast.** From the closed sprints: hours finished per sprint, completion rate, and - from the latest three - how many more sprints the remaining work needs, with an optimistic and a pessimistic case and a finish date.
+- **Enforced by the database.** One active sprint per project and one live sprint per task are unique indexes, not only checks in code.
+
+Sprints are managed through the API only (no screen yet), and sizes are the tasks' hour estimates (there are no story points). Reference: [docs/API.md](docs/API.md#sprints).
+
 ## Roles
 
 | Role | Can |
@@ -351,7 +367,7 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~640 tests, no dependencies
+python -m unittest discover -s tests -v     # ~710 tests, no dependencies
 pip install playwright && playwright install chromium
 python -m unittest discover -s tests -p "test_ui_*.py" -v   # 38 real-browser tests (skipped automatically without Playwright)
 ```
@@ -372,7 +388,7 @@ tests/                 unit, HTTP, CLI and browser tests
 ## Limitations and ideas for later
 
 Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), task templates or
-attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; API tokens are managed through the API and the command line only (no screen), and the primary token cannot be given an expiry; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; API tokens and sprints are managed through the API (tokens also the command line) with no screen yet, sprints are sized in hours rather than points, and the primary token cannot be given an expiry; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
