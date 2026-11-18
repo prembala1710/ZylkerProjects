@@ -5,7 +5,7 @@ from __future__ import annotations
 from ..domain import OPEN_SQL, PROJECT_STATUSES
 from ..errors import Conflict, Forbidden, NotFound, ValidationError
 from ..util import PROJECT_KEY_RE, Checker, escape_like
-from . import activity, project_fields, users
+from . import activity, project_fields, timesheets, users
 
 PROJECT_SELECT = (
     "SELECT p.*, o.username AS o_username, o.display_name AS o_name, "
@@ -276,6 +276,7 @@ def delete_project(ctx, key, confirm):
             "Deleting a project is permanent. Repeat the request with ?confirm=%s" % row["key"],
             code="confirmation_required",
         )
+    timesheets.assert_project_has_no_locked_time(ctx, row["id"])
     activity.detach_project(ctx.conn, row["id"])  # history outlives the project; only the reusable id is let go
     ctx.conn.execute("DELETE FROM projects WHERE id = ?", (row["id"],))
     activity.log(ctx, "project.deleted", project_key=row["key"], details={"key": row["key"], "name": row["name"]})
