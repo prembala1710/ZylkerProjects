@@ -211,6 +211,7 @@ Every change to data, by the person who made it, with old and new values - plus 
 | `data` | `exported` (task CSV export, with row count) | notice |
 | `audit` | `exported` (the audit log itself) | notice |
 | `sprint` | `created`, `updated`, `deleted`, `started`, `closed`, `task_added`, `task_removed` (see [Sprints](#sprints)) | info (`deleted` and `closed` are notice) |
+| `template` | `created`, `updated`, `deleted`, `instantiated` (see [Project templates](#project-templates)) | info (`deleted` is notice) |
 | `system` | `error` (unhandled exception: route and exception *type* only), `search_reindexed` | error, info |
 
 Routine reads are **not** recorded; they would bury the events that matter. Nothing in the log is a token, a request body, a password or an exception
@@ -473,6 +474,47 @@ and says how many more sprints it needs at that velocity: `expected`, `optimisti
 ones, from the first day of the earliest unclosed sprint (or today). `unestimated_tasks` says how much of the backlog the figures cannot see. It is an estimate, not a promise.
 
 Audit events (category `sprint`): `created`, `updated` (with the changes), `deleted` (notice), `started`, `closed` (notice, with the outcome counts), `task_added` and `task_removed` (both attached to the task, so they appear in its history).
+
+## Project templates
+
+A template is the *shape* of a project saved for reuse: its milestones, the task tree (titles, descriptions, types, priorities, estimates, labels), the dependencies between tasks, who does what - as named **slots** such as `designer`, filled with real people
+when a project is started - and every date as a number of days from an **anchor day**. Starting a project from a template means choosing a start day; every date moves with it. Everyone signed in can read templates; managers save, change, preview and use them.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `POST /api/projects/{key}/save-as-template` | manager | `{name, description?, anchor_date?, include_closed?, slots?}`. `201` with the template. See *Saving* |
+| `GET /api/templates` | viewer | `{items}`: id, name, description, `source_project`, `anchor_date`, counts of `tasks`, `milestones` and `dependencies`, `times_used`, `last_used_at`. By name |
+| `GET /api/templates/{template_id}` | viewer | The above plus `slots`, `project` (`span_days`, `description`), `milestone_list`, `task_list` and `dependency_list` (`[blocker, blocked]` pairs of refs) |
+| `PATCH /api/templates/{template_id}` | manager | `name` and `description` only: a template is a snapshot, so its structure is not edited (save a new one instead) |
+| `DELETE /api/templates/{template_id}` | manager | Projects already made from it are unaffected |
+| `POST /api/templates/{template_id}/preview` | manager | Everything `instantiate` would create, with its dates, without creating it. Same body, same checks |
+| `POST /api/templates/{template_id}/instantiate` | manager | Creates the project, milestones, tasks and dependencies. `201` |
+
+### Saving
+
+* Only **open** work is saved unless `include_closed` is true (then done and cancelled tasks are included too). Every saved task starts as `todo` in a new project. A task left out takes its dependencies with it; its subtasks move up to the nearest saved ancestor.
+* `anchor_date` is the day the offsets count from. Default: the project's start date, else the earliest task or milestone date, else the day the project was created. A date more than 3,650 days from the anchor is a `422`.
+* **Slots.** Each person the saved tasks are assigned to becomes a slot, named after their username. `slots` renames them: `{"bob": "Designer"}` (1-40 characters, unique ignoring case; a username that has no saved task is a `422`).
+* Limits: 100 templates (`409 template_limit`), 500 tasks and 50 milestones per template (`409 template_too_large`), nothing to save (`409 template_empty`), name taken (`409 template_name_taken`, ignoring case), a dependency loop (`409 template_cycle`).
+
+### Starting a project
+
+Body of `preview` and `instantiate`:
+
+| Field | Meaning |
+|---|---|
+| `key`, `name`, `start_date` | Required. The key follows the project rules (`409 key_taken` if in use). `start_date` (2000-2100) is day 0: a date saved as "anchor + 12 days" becomes `start_date` + 12 days |
+| `description` | Default: the template project's description |
+| `owner`, `members` | As when creating a project (owner defaults to you). People assigned to a slot are added as members |
+| `assignments` | `{"slot name": "username"}`. An unlisted or `null` slot leaves its tasks unassigned (reported in `unassigned_slots`). An unknown slot, or an unknown or inactive user, is a `422` |
+| `custom_fields` | Passed to the new project; required [custom fields](#project-custom-fields) must be supplied |
+| `roll_weekends` | `true` moves any date that falls on a Saturday or Sunday to the Monday after. The order of dates is never changed |
+
+Every problem in the body is reported at once. The checks and the computations of `preview` and `instantiate` are the same code, and a request that cannot be fully carried out creates nothing (it is one transaction). The project due date is the start date plus the saved project span.
+`instantiate` answers `{project, template, created: {tasks, milestones, dependencies, assigned}, unassigned_slots, tasks}`; `tasks` maps each template ref (`T1`...) to the new task key. Tasks are numbered in template order, parents before their subtasks.
+A run does **not** send an assignment message to Cliq for every task. The project, milestones, tasks and dependencies are recorded in the audit log like hand-made ones, plus one `template.instantiated` event.
+
+Audit events (category `template`): `created` (with counts and how many closed tasks were skipped), `updated`, `deleted` (notice) and `instantiated`.
 
 ## Tasks
 
