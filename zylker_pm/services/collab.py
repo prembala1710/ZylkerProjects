@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from ..errors import Forbidden, NotFound, ValidationError
 from ..util import Checker, truncate
-from . import activity, projects, taskrefs, users
+from . import activity, projects, taskrefs, timesheets, users
 
 MENTION_RE = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9._-]{1,31})", re.IGNORECASE)
 
@@ -157,6 +157,7 @@ def log_time(ctx, key, data):
     latest = (ctx.today + timedelta(days=1)).isoformat()
     if work_date > latest or work_date < "2000-01-01":
         raise ValidationError({"work_date": "must not be in the future"})
+    timesheets.assert_unlocked(ctx, ctx.actor_id, work_date)
     cur = ctx.conn.execute(
         "INSERT INTO time_entries (task_id, user_id, hours, work_date, note, created_at) VALUES (?,?,?,?,?,?)",
         (row["id"], ctx.actor_id, v["hours"], work_date, v.get("note", ""), ctx.now_iso),
@@ -176,6 +177,7 @@ def delete_time(ctx, entry_id):
         raise Forbidden("Only the owner of a time entry or a manager can delete it", code="not_author")
     task = taskrefs.get_row(ctx.conn, "%s-%d" % (row["project_key"], row["number"]))
     projects.require_write(ctx, projects.get_row(ctx.conn, row["project_key"]))
+    timesheets.assert_unlocked(ctx, row["user_id"], row["work_date"])
     ctx.conn.execute("DELETE FROM time_entries WHERE id = ?", (row["id"],))
     activity.log(
         ctx, "time.deleted", project_id=task["project_id"], task_id=task["id"], task_key=taskrefs.key_of(task),

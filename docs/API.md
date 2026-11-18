@@ -132,7 +132,7 @@ the token's name.
 | `POST /api/projects` | manager | `{key, name, description?, status?, owner?, start_date?, due_date?, members?: [username], custom_fields?: {field_key: value}}`. Key: 2-10 chars, letters/digits, starts with a letter. Required [custom fields](#project-custom-fields) must be supplied |
 | `GET /api/projects/{key}` | viewer | Includes `members`, `task_counts` and `custom_fields` (`{field_key: value \| null}` with an entry for every defined field) |
 | `PATCH /api/projects/{key}` | manager | A project cannot be set to `completed` while it has open tasks. `custom_fields` is merged: only the keys you send change, `null` (or an empty string) clears one |
-| `DELETE /api/projects/{key}` | admin | Permanent. Requires `?confirm=<KEY>` |
+| `DELETE /api/projects/{key}` | admin | Permanent. Requires `?confirm=<KEY>`. Refused (`409 timesheet_locked`) while any of its hours sit in a submitted or approved [timesheet](#timesheets) |
 | `POST /api/projects/{key}/members` | manager | `{username}`. Idempotent |
 | `DELETE /api/projects/{key}/members/{username}` | manager | Refused while the member has open tasks, or is the owner |
 | `GET /api/projects/{key}/summary` | viewer | Counts, progress, hours, **health** (with the reasons), next milestone |
@@ -212,6 +212,7 @@ Every change to data, by the person who made it, with old and new values - plus 
 | `audit` | `exported` (the audit log itself) | notice |
 | `sprint` | `created`, `updated`, `deleted`, `started`, `closed`, `task_added`, `task_removed` (see [Sprints](#sprints)) | info (`deleted` and `closed` are notice) |
 | `template` | `created`, `updated`, `deleted`, `instantiated` (see [Project templates](#project-templates)) | info (`deleted` is notice) |
+| `timesheet` | `submitted`, `approved`, `rejected`, `withdrawn`, `reopened` (see [Timesheets](#timesheets)) | info (`reopened` is notice) |
 | `system` | `error` (unhandled exception: route and exception *type* only), `search_reindexed` | error, info |
 
 Routine reads are **not** recorded; they would bury the events that matter. Nothing in the log is a token, a request body, a password or an exception
@@ -516,6 +517,69 @@ A run does **not** send an assignment message to Cliq for every task. The projec
 
 Audit events (category `template`): `created` (with counts and how many closed tasks were skipped), `updated`, `deleted` (notice) and `instantiated`.
 
+## Timesheets
+
+Time is logged on tasks as before (`POST /api/tasks/{key}/time`). A **timesheet** is one person's week, Monday to Sunday, made from the time they logged in it. Nothing is needed to have one: a week nobody has submitted is simply `open`. Submitting a week locks it and puts it in front of a manager, who approves it or sends it back with a reason; an approved week cannot change.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/timesheets/week` | viewer | One person's week as it stands, submitted or not. Query: `week` (any date in it; default this week), `user` (`me`, the default, or a username - managers only). See *The week* |
+| `POST /api/timesheets/submit` | member | `{week?, note?}`: submit your own week. `201` with the week |
+| `GET /api/timesheets` | viewer | `{items, total, limit, offset}`. Your own sheets; managers see everyone's. Query: `status` (comma list), `user`, `from`, `to` (any dates: they name weeks), `limit` (1-200, default 50), `offset`. `status=submitted` alone is the approval queue, oldest first; otherwise newest week first |
+| `GET /api/timesheets/{sheet_id}` | viewer | The sheet's week, with its history. Your own, or any if you are a manager |
+| `POST /api/timesheets/{sheet_id}/approve` | manager | `{note?, revision?}` |
+| `POST /api/timesheets/{sheet_id}/reject` | manager | `{note, revision?}`: the reason is required. The week opens again |
+| `POST /api/timesheets/{sheet_id}/withdraw` | member | The owner takes back a submitted week. No body |
+| `POST /api/timesheets/{sheet_id}/reopen` | admin | `{note}`: opens an approved week again; the reason is required |
+| `POST /api/timesheets/approve-many` | manager | `{ids, note?}` with 1-100 sheet ids. Each is judged on its own: `{approved: [ids], skipped: [{id, code, message}], hours}`. One chat message sums it up |
+| `GET /api/timesheets/missing` | manager | Time logged in finished weeks that nobody has submitted: who to chase. Query: `weeks` (1-26, default 4) |
+| `GET /api/timesheets/summary` | manager | Hours by approval state. Query: `from`, `to` (default the last 30 days), `project`, `user` |
+
+### States
+
+| Status | Meaning | Time can change? |
+|---|---|---|
+| `open` | No sheet yet | yes |
+| `submitted` | Waiting for a decision | no |
+| `approved` | Decided | no |
+| `rejected` | Sent back with a reason | yes - fix it and submit again |
+| `withdrawn` | The owner took it back | yes |
+| `reopened` | An administrator opened an approved week | yes |
+
+A rejected, withdrawn or reopened week is submitted again with the same endpoint; the sheet keeps its `id` and its `revision` goes up by one. Only `submitted` and `approved` are *locked*.
+
+### The week
+
+`GET /api/timesheets/week` and every single-sheet endpoint answer with:
+
+| Field | Meaning |
+|---|---|
+| `id`, `status`, `locked`, `revision` | `id` is `null` and `revision` 0 until the first submission |
+| `user`, `week_start`, `week_end` | The owner, and the Monday and Sunday of the week |
+| `total_hours`, `capacity_hours` | Hours logged now, and the person's weekly capacity |
+| `by_day`, `by_project`, `entries` | Seven days (`date`, `weekday`, `hours`), hours per project, and each entry (`id`, `task`, `title`, `hours`, `work_date`, `note`) |
+| `blocking` | What would stop a submission: `no_time`, `day_over_24`, `future_week` |
+| `warnings` | Worth a look, never a block: `long_day` (more than 12 hours in a day), `weekend_work`, `over_capacity` |
+| `can_submit` | True for the owner when the week is open and nothing is blocking |
+| `note`, `submitted_at`, `submitted` | The submission note and time, and what was submitted (`hours`, `entries`) |
+| `decided_by`, `decided_at`, `decision_note` | The latest decision, cleared when the week is submitted again |
+| `integrity` | `ok` or `changed` for a locked week: whether the entries still match what was submitted. `null` for an open week |
+| `events` | The sheet's history, newest first (`action`, `actor`, `revision`, `hours`, `note`, `at`) |
+
+### Rules
+
+* **Locked weeks.** Logging time on a day, or deleting an entry, in a locked week is `409 timesheet_locked` for everyone, managers and administrators included; `details` names the sheet. Deleting a task, or a project, whose hours sit in a locked week is refused the same way, because it would change what was submitted.
+* **Nobody decides on their own sheet** (`403 own_timesheet`), and the approver's role must be at least the owner's (`403 approver_role_too_low`): a manager cannot approve an administrator's week. Reopening is for administrators and, again, never their own.
+* **A decision can name the `revision` the approver read.** If the person has resubmitted since, it is refused with `409 timesheet_changed` and the current revision in `details`.
+* **Approving checks the entries still match the submission** (`409 timesheet_integrity` if they do not, which can only happen if the data was changed outside the application).
+* Submitting needs at least one entry (`409 timesheet_empty`) and no day over 24 hours (`409 timesheet_invalid`), and the week must have started (`422`). A week that is already locked is `409 timesheet_locked`.
+* `409 timesheet_not_submitted` / `timesheet_not_approved` say the sheet is not in the state the action needs. A sheet that does not exist is `404 timesheet_not_found`.
+* Weeks follow `ZYLKER_TIMEZONE`: "this week" and "finished" are decided by the server's idea of today.
+
+`missing` lists, per person and week, the hours that are logged but neither submitted nor approved - including weeks that were sent back or withdrawn - for people who are still active, over the finished weeks only (the current week is never listed). `summary` puts every entry under the state of the week it falls in: `approved`, `submitted`, or `open` (anything else), per project and per person, with totals; a date range that cuts a week in half counts only the entries inside it.
+
+Audit events (category `timesheet`): `submitted`, `approved`, `rejected`, `withdrawn` and `reopened` (notice), each with the sheet id, owner, week, hours and revision. A chat message goes to the Cliq channel for a submission and for each decision (one message for an `approve-many`).
+
 ## Tasks
 
 | Endpoint | Role | Notes |
@@ -523,7 +587,7 @@ Audit events (category `template`): `created` (with counts and how many closed t
 | `GET /api/tasks` | viewer | Filters and sorting below |
 | `GET /api/tasks/{key}` | viewer | Adds `blocked_by`, `blocks`, `subtask_list`, `allowed_transitions`, `project_status` |
 | `PATCH /api/tasks/{key}` | member | Any subset of the task fields; status changes are checked against the workflow rules |
-| `DELETE /api/tasks/{key}` | manager | Refused when the task has subtasks unless `?cascade=true` |
+| `DELETE /api/tasks/{key}` | manager | Refused when the task has subtasks unless `?cascade=true`, and (`409 timesheet_locked`) while hours logged on it or its subtasks sit in a submitted or approved [timesheet](#timesheets) |
 | `GET /api/tasks/{key}/activity` | viewer | Field-level history: who changed what, from and to |
 | `POST /api/tasks/{key}/dependencies` | member | `{"blocked_by": "WEB-1"}` or `{"blocks": "WEB-3"}`. Same project only; cycles are refused with the loop in `details.cycle` |
 | `DELETE /api/tasks/{key}/dependencies/{other}` | member | Removes the link between the two tasks in either direction |
@@ -532,8 +596,8 @@ Audit events (category `template`): `created` (with counts and how many closed t
 | `PATCH /api/comments/{comment_id}` | member | Author only |
 | `DELETE /api/comments/{comment_id}` | member | Author, or a manager |
 | `GET /api/tasks/{key}/time` | viewer | Time entries |
-| `POST /api/tasks/{key}/time` | member | `{hours (0.01-24), work_date?, note?}`; logged for the calling user |
-| `DELETE /api/time/{entry_id}` | member | Owner of the entry, or a manager |
+| `POST /api/tasks/{key}/time` | member | `{hours (0.01-24), work_date?, note?}`; logged for the calling user. `409 timesheet_locked` if the day is in a submitted or approved [timesheet](#timesheets) |
+| `DELETE /api/time/{entry_id}` | member | Owner of the entry, or a manager. `409 timesheet_locked` inside a submitted or approved [timesheet](#timesheets) |
 
 ### Task fields
 
