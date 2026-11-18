@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Added in schema v2. Shared by fresh databases (SCHEMA) and the v1 -> v2 migration so the two can never drift.
 PROJECT_FIELDS_SCHEMA = """
@@ -360,9 +360,32 @@ CREATE UNIQUE INDEX idx_one_live_sprint_per_task ON sprint_items (task_id) WHERE
 CREATE INDEX idx_sprint_items_sprint ON sprint_items (sprint_id);
 """
 
+# Added in schema v9: project templates. A template is a snapshot of a project's structure (milestones, task tree,
+# dependencies, labels, estimates, who does what as named "slots", and every date as an offset from an anchor day),
+# kept as one JSON document: it is only ever read or replaced whole, never queried into. The counts are denormalised
+# for listing.
+TEMPLATE_SCHEMA = """
+CREATE TABLE project_templates (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    description TEXT NOT NULL DEFAULT '',
+    source_project TEXT,
+    anchor_date TEXT NOT NULL,
+    data TEXT NOT NULL,
+    task_count INTEGER NOT NULL,
+    milestone_count INTEGER NOT NULL,
+    dependency_count INTEGER NOT NULL,
+    times_used INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 # Each entry upgrades a database from version N to N + 1, inside one transaction. A new database is created
 # as version 1 and then walked through every migration, so a fresh install and an upgrade cannot differ.
-MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration, 6: API_TOKEN_SCHEMA, 7: SPRINT_SCHEMA}
+MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration, 6: API_TOKEN_SCHEMA, 7: SPRINT_SCHEMA, 8: TEMPLATE_SCHEMA}
 
 SCHEMA = """
 CREATE TABLE users (
