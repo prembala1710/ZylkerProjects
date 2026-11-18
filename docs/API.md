@@ -12,10 +12,10 @@ Errors always look like `{"error": {"code": "...", "message": "...", "details": 
 | Status | Meaning |
 |---|---|
 | 400 | Malformed JSON / key / header |
-| 401 | Missing, invalid or revoked token |
-| 403 | Role too low, or not a member of the project (`insufficient_role`, `not_project_member`, `not_author`) |
+| 401 | Missing, invalid or revoked token; for an [API token](#api-tokens) also `token_expired`, `token_revoked`, `token_ip_not_allowed` |
+| 403 | Role too low, or not a member of the project (`insufficient_role`, `not_project_member`, `not_author`); for an API token also `token_read_only`, `primary_token_required` |
 | 404 | Unknown route, project, task, ... |
-| 409 | A business rule blocked the change (`invalid_transition`, `blocked_by_open_tasks`, `open_subtasks`, `dependency_cycle`, `project_archived`, ...) |
+| 409 | A business rule blocked the change (`invalid_transition`, `blocked_by_open_tasks`, `open_subtasks`, `dependency_cycle`, `project_archived`, `token_limit_reached`, ...) |
 | 413 / 415 | Body too large / wrong content type |
 | 422 | Field validation failed - `details` maps each field to its problem |
 | 429 | Throttled: too many failed sign-ins from this address (`too_many_failures`) or the user's request budget is used up (`rate_limited`). `Retry-After` says how many seconds to wait |
@@ -33,7 +33,7 @@ Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric
 |---|---|---|
 | `GET /api/health` | public | `{"status": "ok", "version": ...}` - for load balancers |
 | `GET /api/meta` | viewer | Enumerations, the workflow transition map, server `today` and timezone, custom-field types and limits |
-| `GET /api/me` | viewer | The authenticated user |
+| `GET /api/me` | viewer | The authenticated user. With an [API token](#api-tokens), `role` is the token's effective role |
 
 ## Users
 
@@ -42,8 +42,87 @@ Tasks are addressed by key (`WEB-12`), projects by key (`WEB`), users by numeric
 | `GET /api/users` | viewer | Active users; `?include_inactive=true` (admins only) adds deactivated ones |
 | `POST /api/users` | admin | `{username, display_name, email?, role?, weekly_capacity_hours?}` - the response contains the API token, **once** |
 | `PATCH /api/users/{user_id}` | viewer | Admins: any field (`role`, `active`, `weekly_capacity_hours`, ...). Everyone else: only their own `display_name` / `email`. The last active admin cannot be demoted or deactivated |
-| `POST /api/users/{user_id}/rotate-token` | viewer | Admins for anyone, others for themselves. Invalidates the old token immediately |
+| `POST /api/users/{user_id}/rotate-token` | viewer | Admins for anyone, others for themselves. Invalidates the old primary token immediately (API tokens are unaffected). Refused with an API token: `403 primary_token_required` |
 | `GET /api/activity` | admin | The raw global activity feed; `?limit=&before=`. Superseded by [`GET /api/audit`](#audit-log), which adds filters, search and security events |
+
+## API tokens
+
+Every user has a *primary token* (`zpm_...`): created with the account, the user's full powers, never expires, replaced with `rotate-token`. For
+integrations - a CI job, a reporting script, a service account - mint *API tokens* instead: `zpt_...` credentials that
+
+* **expire**: 1 to 365 days (default 30), there is no "never";
+* can be **capped to a lower role** than their owner's (a `member` token for a manager's script);
+* can be **read-only**: every method except `GET` and `HEAD` is refused;
+* can be **limited to addresses**: up to ten IP addresses or networks;
+* are **tracked** (last used, from where, how often) and can be **revoked** at any time, one by one or all at once.
+
+An API token is used like any other: `Authorization: Bearer zpt_...`.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/tokens` | viewer | Your tokens, newest first: `{items, limits}`. `?status=active,expired,revoked` filters. Administrators: `?user=<username>` for one person's, `?user=*` for everyone's |
+| `POST /api/tokens` | viewer | Mint a token (body below). `201` with the token, **once**. Administrators may add `user` to mint one for someone else, e.g. a service account |
+| `GET /api/tokens/current` | viewer | How this request is authenticated: `{type: "primary", role}` or `{type: "api_token", role, owner_role, ...}` with the token's details. The one token endpoint an API token may call |
+| `GET /api/tokens/{token_id}` | viewer | One token: yours, or anyone's for an administrator. Anyone else's is `404` |
+| `DELETE /api/tokens/{token_id}` | viewer | Revoke it. Takes effect at once; repeating it is harmless. Returns the token, now `revoked` |
+| `DELETE /api/tokens` | viewer | Revoke every active token of yours - or, for an administrator, of `?user=<username>`. Returns `{user, revoked}` |
+
+Every role may mint tokens for themselves: a token can never exceed its owner's role, so nobody gains anything by it.
+
+Body of `POST /api/tokens`:
+
+| Field | Meaning |
+|---|---|
+| `name` | Required, 1-60 characters, no control characters. Unique among the owner's active tokens (case-insensitive), else `409 token_name_taken` |
+| `expires_in_days` | Integer 1-365. Default 30 |
+| `role_cap` | `viewer`, `member`, `manager` or `admin`. Default: the owner's role. Higher than the owner's role is a `422` |
+| `read_only` | `true` to refuse every request that is not `GET` or `HEAD` |
+| `allowed_ips` | A list of up to 10 addresses or networks: `"203.0.113.7"`, `"10.0.0.0/8"`, `"2001:db8::/32"`. Stored in normalised form. Empty or absent: usable from anywhere |
+| `user` | Administrators only: the user the token is for (default: yourself). A deactivated user cannot have tokens (`409 user_inactive`) |
+
+A token as returned: `id`, `name`, `hint` (`zpt_...` and the last four characters, to tell tokens apart: the token itself is never shown again), `user`, `role_cap`,
+`read_only`, `allowed_ips`, `status` (`active`, `expired` or `revoked`), `expires_at`, `expires_soon` (active and expiring within 7 days), `created_at`, `last_used_at`,
+`last_used_ip`, `use_count`, `revoked_at`. Only the creation response has a `token` field. The server keeps a SHA-256 digest, never the token.
+
+### What a token may do
+
+* **Effective role** is the lower of the owner's *current* role and the token's `role_cap`. Demoting the owner demotes their tokens at once; promoting
+  the owner does not widen a cap. `GET /api/me` reports the effective role, and every role check uses it.
+* **Read-only** is checked before the role: `403 token_read_only`. A few `POST` endpoints only read (the recurrence preview, for one) - a read-only token cannot call them.
+* **Addresses** are matched against the address the audit log records (behind a reverse proxy see `ZYLKER_PROXY_HOPS`); IPv4 addresses in IPv6 notation such as
+  `::ffff:203.0.113.7` match their IPv4 network. A request whose address cannot be determined never matches an allow-list.
+* **A token cannot manage credentials.** Everything under `/api/tokens` except `/api/tokens/current`, and `rotate-token`, answers `403 primary_token_required`
+  to an API token. A leaked integration key can neither mint itself a successor nor replace its owner's primary token and lock them out.
+* **Deactivating the owner disables every token** immediately (they answer like any unknown token); reactivating restores the ones that have not expired.
+  Rotating the *primary* token leaves API tokens alone: revoke those with `DELETE /api/tokens` (or `zylker-pm revoke-tokens`).
+* **At most 10 active tokens per user** (`409 token_limit_reached`). Expired and revoked tokens stay listed for 30 days, so an `expired` answer and the audit
+  log remain explainable, and are then forgotten (the token then answers like any unknown one).
+* **Each token has a request budget of its own** (see [Rate limiting](#rate-limiting-and-brute-force-protection)): a busy integration cannot use up its owner's, or its siblings'.
+
+### Why a token was refused
+
+| Answer | When |
+|---|---|
+| `401 token_expired` | The current time is at or past `expires_at` |
+| `401 token_revoked` | It was revoked |
+| `401 token_ip_not_allowed` | The request comes from outside the token's `allowed_ips` |
+| `401 unauthorized` | Not a token this server knows - or one forgotten after 30 days, or whose owner is deactivated |
+| `403 token_read_only` | A write with a read-only token |
+| `403 primary_token_required` | Token management with an API token |
+| `403 insufficient_role` | The route needs more than the token's effective role |
+
+Every `401` carries `WWW-Authenticate: Bearer` and counts as a failed sign-in for the address (see [Rate limiting](#rate-limiting-and-brute-force-protection)).
+
+### Usage tracking and audit
+
+`last_used_at`, `last_used_ip` and `use_count` are written at most once a minute per token; requests in between are counted in memory and added with the next write,
+so reads never turn into a write per request. They can therefore be up to a minute stale, and the last minute of use before a restart or a quiet spell may be
+missing from the count. Every authenticated request counts - also one answered `403` or `404` - but not one refused at authentication.
+
+Audit events (category `token`, all notice): `created` (name, owner, hint, cap, read-only, addresses, expiry), `revoked` and `revoked_all` (how many). The token and its
+digest never enter the log. A refused use is an `auth.failed` event whose `reason` is `token_expired`, `token_revoked` or `token_ip_not_allowed` and which names the
+token's `hint` and owner; a write refused to a read-only token is an `auth.denied` with code `token_read_only`; a session started with a token carries `details.token`,
+the token's name.
 
 ## Projects
 
@@ -125,8 +204,9 @@ Every change to data, by the person who made it, with old and new values - plus 
 | `recurrence` | `created`, `updated`, `deleted`, `generated`, `skipped` (see [Recurring tasks](#recurring-tasks)) | info (`deleted` and `skipped` are notice) |
 | `project_field` | `created`, `updated`, `deleted` | info (`deleted` is notice) |
 | `user` | `created`, `updated` (role, active, ...), `token_rotated` | notice |
+| `token` | `created`, `revoked`, `revoked_all` (see [API tokens](#api-tokens)) | notice |
 | `import` | `completed` | notice |
-| `auth` | `failed` (missing or invalid token), `denied` (role too low, not a project member), `session_started`, `throttled`, `unblocked` (see [Rate limiting](#rate-limiting-and-brute-force-protection)) | warning, warning, info, warning, notice |
+| `auth` | `failed` (missing, invalid, expired or revoked token, or an API token used from the wrong address: `details.reason` is `missing_token`, `invalid_token`, `token_expired`, `token_revoked` or `token_ip_not_allowed`), `denied` (role too low, not a project member, read-only token), `session_started`, `throttled`, `unblocked` (see [Rate limiting](#rate-limiting-and-brute-force-protection)) | warning, warning, info, warning, notice |
 | `webhook` | `created`, `updated`, `deleted`, `secret_rotated`, `test`, `redelivered`, `disabled` (see [Webhooks](#webhooks)) | info (`deleted` and `secret_rotated` are notice, `disabled` is warning) |
 | `data` | `exported` (task CSV export, with row count) | notice |
 | `audit` | `exported` (the audit log itself) | notice |
@@ -138,7 +218,7 @@ message. User-agent and path text is stripped of control characters and truncate
 **Repeats are merged.** The same `auth.failed`, `auth.denied` or `system.error` from the same actor and address within five minutes updates one row
 (`details.count`, `details.last_seen`) instead of adding another, so a flood of bad requests cannot grow the log without bound and the count still says how bad it was.
 
-**Sessions.** The first authenticated request of a user after 30 quiet minutes records `auth.session_started` with the client's user-agent.
+**Sessions.** The first authenticated request of a user after 30 quiet minutes records `auth.session_started` with the client's user-agent. The primary token and every [API token](#api-tokens) of a user have sessions of their own; one started with an API token also carries `details.token` (its name).
 
 **Addresses.** `ip` is the connection's address. Behind a reverse proxy set `ZYLKER_PROXY_HOPS` to the number of proxies so the real client is taken
 from `X-Forwarded-For`; with the default of 0 that header is ignored because a client can forge it.
@@ -194,7 +274,7 @@ Two limits protect the server; both can be tuned or switched off with environmen
   the address is then blocked for 60 seconds, and each repeat doubles the time (2, 4, 8 ... up to an hour; an address that stays quiet for an hour starts
   again at 60 seconds). While blocked, requests that fail to authenticate get `429 too_many_failures` and do **not** extend the block. Requests with a
   *valid* token are still served, so a shared office address is not locked out by one person's typo. A missing token counts as a failure.
-* **Request budget per user** (`ZYLKER_RATE_LIMIT_PER_MINUTE`, default 600). A token bucket: the sustained rate, with a burst of a fifth of it (at least 10,
+* **Request budget per user** (`ZYLKER_RATE_LIMIT_PER_MINUTE`, default 600; every [API token](#api-tokens) has a budget of its own, separate from its owner's). A token bucket: the sustained rate, with a burst of a fifth of it (at least 10,
   never more than the rate itself). Each authenticated request costs one - including ones refused with 403 - and carries `X-RateLimit-Limit` (the per-minute
   rate) and `X-RateLimit-Remaining` (requests left in the bucket). When it is empty the answer is `429 rate_limited` and nothing is executed.
 
