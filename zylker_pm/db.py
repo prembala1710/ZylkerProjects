@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Added in schema v2. Shared by fresh databases (SCHEMA) and the v1 -> v2 migration so the two can never drift.
 PROJECT_FIELDS_SCHEMA = """
@@ -164,9 +164,136 @@ CREATE INDEX idx_wd_hook ON webhook_deliveries (webhook_id, id);
 CREATE INDEX idx_wd_finished ON webhook_deliveries (finished_at);
 """
 
+# Added in schema v6: full-text search. One FTS5 table holds a searchable copy of every task, comment and project;
+# triggers keep it in step with the data, whichever code path changes it (API, CSV import, recurring tasks, CLI),
+# so no service can forget to update it. Row ids encode the source - task id * 4, comment id * 4 + 1, project
+# id * 4 + 2 - which makes every update and delete a primary-key operation instead of a scan.
+# A Python whose SQLite lacks FTS5 gets the "like" engine instead (no index, substring matching); `search_meta`
+# records which one this database uses.
+def _clean(expr):
+    """Strip the two control characters search uses as highlight markers from indexed text."""
+    return "replace(replace(%s, char(2), ''), char(3), '')" % expr
+
+
+_SEARCH_COLUMNS = "rowid, kind, ref, project_id, task_id, title, labels, body"
+_SEARCH_TASKS = (
+    "SELECT t.id * 4, 'task', t.id, t.project_id, t.id, %s, %s, %s FROM tasks t"
+    % (
+        _clean("t.title"),
+        _clean("COALESCE((SELECT group_concat(label, ' ') FROM task_labels WHERE task_id = t.id), '')"),
+        _clean("t.description"),
+    )
+)
+_SEARCH_COMMENTS = (
+    "SELECT c.id * 4 + 1, 'comment', c.id, t.project_id, c.task_id, '', '', %s FROM comments c JOIN tasks t ON t.id = c.task_id"
+    % _clean("c.body")
+)
+_SEARCH_PROJECTS = (
+    "SELECT p.id * 4 + 2, 'project', p.id, p.id, NULL, %s, '', %s FROM projects p"
+    % (_clean("p.key || ' ' || p.name"), _clean("p.description"))
+)
+
+
+def _put(rows, where):
+    return "INSERT INTO search_index (%s) %s WHERE %s;" % (_SEARCH_COLUMNS, rows, where)
+
+
+SEARCH_BACKFILL_STATEMENTS = tuple(
+    "INSERT INTO search_index (%s) %s" % (_SEARCH_COLUMNS, rows) for rows in (_SEARCH_TASKS, _SEARCH_COMMENTS, _SEARCH_PROJECTS)
+)
+SEARCH_BACKFILL = "\n".join(statement + ";" for statement in SEARCH_BACKFILL_STATEMENTS)
+
+SEARCH_FTS_OBJECTS = (
+    """
+CREATE VIRTUAL TABLE search_index USING fts5(
+    kind UNINDEXED, ref UNINDEXED, project_id UNINDEXED, task_id UNINDEXED,
+    title, labels, body,
+    tokenize = 'porter unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER search_tasks_ai AFTER INSERT ON tasks BEGIN
+    %(task_new)s
+END;
+CREATE TRIGGER search_tasks_au AFTER UPDATE OF title, description ON tasks BEGIN
+    DELETE FROM search_index WHERE rowid = NEW.id * 4;
+    %(task_new)s
+END;
+CREATE TRIGGER search_tasks_project AFTER UPDATE OF project_id ON tasks WHEN OLD.project_id IS NOT NEW.project_id BEGIN
+    UPDATE search_index SET project_id = NEW.project_id WHERE rowid = NEW.id * 4;
+    UPDATE search_index SET project_id = NEW.project_id WHERE rowid IN (SELECT id * 4 + 1 FROM comments WHERE task_id = NEW.id);
+END;
+CREATE TRIGGER search_tasks_bd BEFORE DELETE ON tasks BEGIN
+    DELETE FROM search_index WHERE rowid = OLD.id * 4;
+    DELETE FROM search_index WHERE rowid IN (SELECT id * 4 + 1 FROM comments WHERE task_id = OLD.id);
+END;
+
+CREATE TRIGGER search_labels_ai AFTER INSERT ON task_labels BEGIN
+    DELETE FROM search_index WHERE rowid = NEW.task_id * 4;
+    %(task_of_label)s
+END;
+CREATE TRIGGER search_labels_ad AFTER DELETE ON task_labels BEGIN
+    DELETE FROM search_index WHERE rowid = OLD.task_id * 4;
+    %(task_of_old_label)s
+END;
+
+CREATE TRIGGER search_comments_ai AFTER INSERT ON comments BEGIN
+    %(comment_new)s
+END;
+CREATE TRIGGER search_comments_au AFTER UPDATE OF body ON comments BEGIN
+    DELETE FROM search_index WHERE rowid = NEW.id * 4 + 1;
+    %(comment_new)s
+END;
+CREATE TRIGGER search_comments_ad AFTER DELETE ON comments BEGIN
+    DELETE FROM search_index WHERE rowid = OLD.id * 4 + 1;
+END;
+
+CREATE TRIGGER search_projects_ai AFTER INSERT ON projects BEGIN
+    %(project_new)s
+END;
+CREATE TRIGGER search_projects_au AFTER UPDATE OF key, name, description ON projects BEGIN
+    DELETE FROM search_index WHERE rowid = NEW.id * 4 + 2;
+    %(project_new)s
+END;
+CREATE TRIGGER search_projects_bd BEFORE DELETE ON projects BEGIN
+    DELETE FROM search_index WHERE rowid IN (SELECT id * 4 FROM tasks WHERE project_id = OLD.id);
+    DELETE FROM search_index WHERE rowid IN (SELECT c.id * 4 + 1 FROM comments c JOIN tasks t ON t.id = c.task_id WHERE t.project_id = OLD.id);
+    DELETE FROM search_index WHERE rowid = OLD.id * 4 + 2;
+END;
+"""
+    % {
+        "task_new": _put(_SEARCH_TASKS, "t.id = NEW.id"),
+        "task_of_label": _put(_SEARCH_TASKS, "t.id = NEW.task_id"),
+        "task_of_old_label": _put(_SEARCH_TASKS, "t.id = OLD.task_id"),
+        "comment_new": _put(_SEARCH_COMMENTS, "c.id = NEW.id"),
+        "project_new": _put(_SEARCH_PROJECTS, "p.id = NEW.id"),
+    }
+)
+
+_SEARCH_META = "CREATE TABLE search_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);\nINSERT INTO search_meta VALUES ('engine', '%s');\n"
+
+
+def fts5_available() -> bool:
+    """Does this Python's SQLite have the FTS5 module?"""
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE VIRTUAL TABLE probe USING fts5(x)")
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def search_migration() -> str:
+    """The v5 -> v6 script. Decided when it runs, so a database is created for the SQLite it will actually be used with."""
+    if fts5_available():
+        return _SEARCH_META % "fts5" + SEARCH_FTS_OBJECTS + SEARCH_BACKFILL
+    return _SEARCH_META % "like"
+
+
 # Each entry upgrades a database from version N to N + 1, inside one transaction. A new database is created
 # as version 1 and then walked through every migration, so a fresh install and an upgrade cannot differ.
-MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA}
+MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration}
 
 SCHEMA = """
 CREATE TABLE users (
@@ -323,13 +450,39 @@ def init_db(path: str) -> None:
         while version < SCHEMA_VERSION:
             _migrate(conn, version)
             version += 1
+        if search_engine(conn) == "fts5" and not fts5_available():
+            raise RuntimeError(
+                "This database uses SQLite FTS5 full-text search, which this Python's SQLite does not provide. "
+                "Use a Python build with FTS5, or restore a backup made before schema v6."
+            )
     finally:
         conn.close()
 
 
+def search_engine(conn) -> str | None:
+    """'fts5' or 'like' (None on a database older than schema v6)."""
+    try:
+        row = conn.execute("SELECT value FROM search_meta WHERE key = 'engine'").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row[0] if row else None
+
+
+def switch_search_to_fts5(conn) -> None:
+    """Move a database that fell back to the 'like' engine onto FTS5 (all or nothing)."""
+    script = "BEGIN IMMEDIATE;\n%s\n%s\nUPDATE search_meta SET value = 'fts5' WHERE key = 'engine';\nCOMMIT;" % (SEARCH_FTS_OBJECTS, SEARCH_BACKFILL)
+    try:
+        conn.executescript(script)
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
 def _migrate(conn: sqlite3.Connection, version: int) -> None:
     """All-or-nothing: a failed migration leaves the database exactly as it was."""
-    script = "BEGIN IMMEDIATE;\n%s\nPRAGMA user_version = %d;\nCOMMIT;" % (MIGRATIONS[version], version + 1)
+    body = MIGRATIONS[version]
+    script = "BEGIN IMMEDIATE;\n%s\nPRAGMA user_version = %d;\nCOMMIT;" % (body() if callable(body) else body, version + 1)
     try:
         conn.executescript(script)
     except BaseException:
