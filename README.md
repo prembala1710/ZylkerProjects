@@ -34,6 +34,8 @@ standard library alone - **no packages to install, no build step** - and stores 
   tasks on time without ever duplicating or flooding (see [Recurring tasks](#recurring-tasks)).
 - **Sprints** - time-boxed iterations: plan tasks against each person's capacity, start (the commitment is fixed), watch scope change and a burndown with a
   working-day ideal line, close with unfinished work carried over, and get velocity and a delivery forecast from the sprints that have closed (see [Sprints](#sprints)).
+- **Project templates** - save the shape of a project (milestones, task tree, dependencies, estimates, labels, who-does-what as role slots) and start new projects from it:
+  pick a start day and every date moves, fill the slots with real people, preview first (see [Project templates](#project-templates)).
 - **Scoped, expiring API tokens** - credentials for scripts and integrations that expire, can be capped to a lower role, made read-only or limited to
   certain addresses, and can be revoked at any time (see [API tokens](#api-tokens)).
 
@@ -238,6 +240,21 @@ A manager creates a sprint for a project (`POST /api/projects/{key}/sprints`: a 
 
 Sprints are managed through the API only (no screen yet), and sizes are the tasks' hour estimates (there are no story points). Reference: [docs/API.md](docs/API.md#sprints).
 
+## Project templates
+
+Every consultancy, product team or IT department starts the same kinds of project again and again. Save a good one once and reuse it.
+
+- **Save** (`POST /api/projects/{key}/save-as-template`): the milestones, the task tree, the "blocked by" links, estimates, labels, priorities and descriptions. Only open work by default, every task starting again as *todo*. Who does what is kept as **slots**
+  ("designer", "reviewer"): you name them, and fill them with real people when you start a project.
+- **Start** (`POST /api/templates/{id}/instantiate`): choose a key, a name and a **start day**. Every date in the template is stored as "days from the anchor day", so the whole plan shifts to your start day; optionally weekend dates roll to Monday. People who get a slot join the project.
+- **Preview first.** `.../preview` takes the same request and returns every project, milestone and task date it would create, without creating anything.
+- **All or nothing.** A taken key, an unknown person, a missing required custom field - anything that would stop the run - is reported (all problems at once) and nothing is created. A template that somehow holds a dependency loop is refused.
+- **Tidy about what it skips.** Closed tasks are left out (or included on request); their dependencies go with them and their subtasks move up to the nearest task that stays.
+- **No flood.** Starting a project does not send a Cliq message per assigned task; the tasks, milestones and dependencies are in the audit log like hand-made ones, plus one `template.instantiated` event.
+
+A template is a snapshot: later changes to the project it came from do not reach it, and deleting a template leaves its projects alone. Templates are managed through the API only (no screen yet) and their structure cannot be edited, only renamed.
+Reference: [docs/API.md](docs/API.md#project-templates).
+
 ## Roles
 
 | Role | Can |
@@ -367,7 +384,7 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~710 tests, no dependencies
+python -m unittest discover -s tests -v     # ~760 tests, no dependencies
 pip install playwright && playwright install chromium
 python -m unittest discover -s tests -p "test_ui_*.py" -v   # 38 real-browser tests (skipped automatically without Playwright)
 ```
@@ -388,7 +405,7 @@ tests/                 unit, HTTP, CLI and browser tests
 ## Limitations and ideas for later
 
 Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), task templates or
-attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; API tokens and sprints are managed through the API (tokens also the command line) with no screen yet, sprints are sized in hours rather than points, and the primary token cannot be given an expiry; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; API tokens, sprints and project templates are managed through the API (tokens also the command line) with no screen yet, sprints are sized in hours rather than points, and the primary token cannot be given an expiry; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
