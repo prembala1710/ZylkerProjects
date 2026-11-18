@@ -40,6 +40,7 @@ CATEGORIES = {
     "webhook": "Webhooks",
     "token": "API tokens",
     "sprint": "Sprints",
+    "template": "Project templates",
 }
 SEVERITIES = ("info", "notice", "warning", "error")
 
@@ -68,6 +69,7 @@ ACTION_SEVERITY = {
     "token.revoked_all": "notice",
     "sprint.deleted": "notice",
     "sprint.closed": "notice",
+    "template.deleted": "notice",
 }
 
 MERGE_WINDOW_SECONDS = 300  # repeats of the same security event inside this window become one counted row
