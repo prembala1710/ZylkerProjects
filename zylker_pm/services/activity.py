@@ -24,6 +24,9 @@ def log(ctx, action, *, project_id=None, project_key=None, task_id=None, task_ke
         ctx.conn, ctx.now_iso, event_id=cur.lastrowid, action=action, project_key=project_key, task_key=task_key,
         actor_id=ctx.actor_id, details=details,
     )  # fmt: skip
+    from . import inbox  # local import: the inbox looks things up through services that log here
+
+    inbox.fan_out(ctx, cur.lastrowid, action, project_id, project_key, task_id, task_key, details)
 
 
 def detach_task(conn, task_ids):
