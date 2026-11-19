@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # Added in schema v2. Shared by fresh databases (SCHEMA) and the v1 -> v2 migration so the two can never drift.
 PROJECT_FIELDS_SCHEMA = """
@@ -419,9 +419,63 @@ CREATE TABLE timesheet_events (
 CREATE INDEX idx_timesheet_events_sheet ON timesheet_events (timesheet_id, id);
 """
 
+# Added in schema v11: the notification inbox. `task_watches` and `project_watches` say who wants to hear about what
+# (a task watch is `watching` or `ignoring`, and `source` tells a deliberate choice from one made on the person's
+# behalf); `notifications` is each person's inbox, filled from audit events inside the same transaction as the change
+# (`last_event_id` is the audit event that last touched an item, which is also its order and its page cursor);
+# `notification_settings` holds per-person switches as JSON.
+NOTIFICATION_SCHEMA = """
+CREATE TABLE task_watches (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    state TEXT NOT NULL CHECK (state IN ('watching','ignoring')),
+    source TEXT NOT NULL CHECK (source IN ('manual','auto')),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, task_id)
+);
+CREATE INDEX idx_task_watches_task ON task_watches (task_id, state);
+
+CREATE TABLE project_watches (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    level TEXT NOT NULL CHECK (level IN ('all','important')),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, project_id)
+);
+CREATE INDEX idx_project_watches_project ON project_watches (project_id);
+
+CREATE TABLE notification_settings (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id),
+    settings TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE notifications (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    kind TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    actor_id INTEGER REFERENCES users(id),
+    actor_name TEXT,
+    project_key TEXT,
+    task_key TEXT,
+    title TEXT NOT NULL DEFAULT '',
+    excerpt TEXT NOT NULL DEFAULT '',
+    extra TEXT NOT NULL DEFAULT '{}',
+    count INTEGER NOT NULL DEFAULT 1,
+    first_event_id INTEGER NOT NULL,
+    last_event_id INTEGER NOT NULL,
+    read_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_notifications_order ON notifications (user_id, last_event_id);
+CREATE INDEX idx_notifications_unread ON notifications (user_id, read_at, last_event_id);
+"""
+
 # Each entry upgrades a database from version N to N + 1, inside one transaction. A new database is created
 # as version 1 and then walked through every migration, so a fresh install and an upgrade cannot differ.
-MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration, 6: API_TOKEN_SCHEMA, 7: SPRINT_SCHEMA, 8: TEMPLATE_SCHEMA, 9: TIMESHEET_SCHEMA}
+MIGRATIONS = {1: PROJECT_FIELDS_SCHEMA, 2: AUDIT_SCHEMA, 3: RECURRENCE_SCHEMA, 4: WEBHOOK_SCHEMA, 5: search_migration, 6: API_TOKEN_SCHEMA, 7: SPRINT_SCHEMA, 8: TEMPLATE_SCHEMA, 9: TIMESHEET_SCHEMA, 10: NOTIFICATION_SCHEMA}
 
 SCHEMA = """
 CREATE TABLE users (

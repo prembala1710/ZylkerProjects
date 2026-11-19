@@ -38,6 +38,8 @@ standard library alone - **no packages to install, no build step** - and stores 
   pick a start day and every date moves, fill the slots with real people, preview first (see [Project templates](#project-templates)).
 - **Timesheet approval** - people submit a week of logged time, a manager approves it or sends it back with a reason, and an approved week is locked: nobody can add or remove
   time in it, and the figures can be proven unchanged (see [Timesheet approval](#timesheet-approval)).
+- **Notification inbox** - a personal inbox of what concerns you (assignments, mentions, decisions on your timesheet, activity on tasks and projects you watch),
+  merged so a burst is one item, with unread counts, per-kind switches and per-task "ignore" (see [Notification inbox](#notification-inbox)).
 - **Scoped, expiring API tokens** - credentials for scripts and integrations that expire, can be capped to a lower role, made read-only or limited to
   certain addresses, and can be revoked at any time (see [API tokens](#api-tokens)).
 
@@ -272,6 +274,20 @@ Time logged on tasks becomes a **timesheet** per person and week (Monday to Sund
 
 Timesheets are managed through the API only (no screen yet). Reference: [docs/API.md](docs/API.md#timesheets).
 
+## Notification inbox
+
+Everyone has an inbox of what concerns them. It is filled from the audit events as changes are made - in the same transaction, so a rolled-back change tells nobody - whichever way the change came in (API, CSV import, recurring tasks, a template, the command line).
+
+- **Told directly.** When a task is assigned to you, when you are `@mentioned`, and when your timesheet is approved, sent back or reopened.
+- **Watching.** You hear about comments, status changes and edits on tasks you watch: ones you chose to (`PUT /api/tasks/{key}/watch`) or ones you created, were assigned, commented on or were mentioned in. A project can be watched too, at level `all` or only `important`. A task you never touched is silent.
+- **Ignoring** a task silences it completely, except for being mentioned, and stays that way when you act on it later.
+- **Never your own actions**, unless you switch `self_notify` on; each kind can be switched off in `PUT /api/me/notification-settings`.
+- **A burst is one item.** Comments, status changes and edits on one task, and tasks created in one project, merge into a single unread item with a count ("3 new comments ... (latest by Carol)"; "todo to done"); starting a project from a template hands you one "assigned you 12 tasks", not twelve. Mentions and decisions never merge.
+- **Bounded.** Read items go after 30 days, nobody keeps more than 500 (read ones first), and one event reaches each person at most once, as the most important reason.
+- **Cannot break anything.** A failure while creating notifications is rolled back and logged; the change itself always goes through.
+
+The inbox is managed through the API only (no screen yet; `GET /api/inbox/count` is cheap enough to poll for a badge). Reference: [docs/API.md](docs/API.md#notification-inbox).
+
 ## Roles
 
 | Role | Can |
@@ -401,7 +417,7 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # ~800 tests, no dependencies
+python -m unittest discover -s tests -v     # ~860 tests, no dependencies
 pip install playwright && playwright install chromium
 python -m unittest discover -s tests -p "test_ui_*.py" -v   # 38 real-browser tests (skipped automatically without Playwright)
 ```
@@ -422,7 +438,7 @@ tests/                 unit, HTTP, CLI and browser tests
 ## Limitations and ideas for later
 
 Dependencies are finish-to-start and within one project; there are no custom fields on tasks (only on projects), task templates or
-attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; API tokens, sprints, project templates and timesheet approval are managed through the API (tokens also the command line) with no screen yet, sprints are sized in hours rather than points, and the primary token cannot be given an expiry; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+attachments; custom project fields cannot be reordered or filtered on yet; recurring tasks have no yearly or n-th-weekday schedules and make one task per date (no subtasks or dependencies); the audit log has no retention policy or alerting; search is available through the API only (the search box in the page still uses the older project and task filters); webhooks are managed through the API only (no admin screen yet), carry the audit event as it is (no templates), and may arrive out of order; API tokens, sprints, project templates, timesheet approval and the notification inbox are managed through the API (tokens also the command line) with no screen yet, sprints are sized in hours rather than points, and the primary token cannot be given an expiry; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*
