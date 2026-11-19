@@ -580,6 +580,58 @@ A rejected, withdrawn or reopened week is submitted again with the same endpoint
 
 Audit events (category `timesheet`): `submitted`, `approved`, `rejected`, `withdrawn` and `reopened` (notice), each with the sheet id, owner, week, hours and revision. A chat message goes to the Cliq channel for a submission and for each decision (one message for an `approve-many`).
 
+## Notification inbox
+
+Every signed-in user has an inbox of what happened that concerns them, filled as changes are made (inside the same transaction, so a notification exists if and only if the change was committed - whichever way the change was made: the API, a CSV import, recurring tasks, a template, the command line). It is personal: nobody reads or changes anyone else's inbox, watches or settings. Viewers have one too.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/inbox` | viewer | `{items, unread, next_before}`, newest first. Query: `unread=true`, `kind=a,b`, `project=KEY`, `limit` (1-100, default 30), `before=<event_id>` (the cursor: pass `next_before`) |
+| `GET /api/inbox/count` | viewer | `{unread, total}`: cheap enough to poll for a badge |
+| `GET /api/inbox/{item_id}` | viewer | One of your items (`404 notification_not_found` for anyone else's) |
+| `POST /api/inbox/read` | viewer | Either `{ids: [...]}` (1-200) or `{all: true, project?, kind?, before?}`: mark read what matches (`before` is an `event_id`: everything up to and including it). `{updated, unread}` |
+| `POST /api/inbox/unread` | viewer | `{ids: [...]}`: mark items unread again. `{updated, unread}` |
+| `DELETE /api/inbox/{item_id}` | viewer | Remove one item |
+| `DELETE /api/inbox` | viewer | `?status=read` removes what is read, `?status=all` everything. `{removed, unread}` |
+| `GET /api/me/notification-settings` | viewer | `{kinds: {kind: bool}, self_notify, labels}` |
+| `PUT /api/me/notification-settings` | viewer | `{kinds?: {kind: bool}, self_notify?: bool}`: only what you send changes |
+| `GET /api/watching` | viewer | `{tasks, projects}`: what you watch or ignore (`?limit=` 1-500, default 200 tasks) |
+| `GET /api/tasks/{key}/watchers` | viewer | `{task, count, watchers: [{id, username, display_name, source}], me}` (at most 200 listed). `me` is `{state, source}` or `null` |
+| `PUT /api/tasks/{key}/watch` | viewer | `{state: "watching" \| "ignoring"}`. Returns the watchers as above |
+| `DELETE /api/tasks/{key}/watch` | viewer | Back to the default (idempotent) |
+| `PUT /api/projects/{key}/watch` | viewer | `{level?: "all" \| "important"}`, default `all`. `{project, level}` |
+| `DELETE /api/projects/{key}/watch` | viewer | Stop watching the project (idempotent) |
+
+### An item
+
+`id`, `kind`, `reason`, `text` (one plain sentence, built from stored fields: never markup), `count` (how many events were merged into it), `actor` (`{id, name}`, the latest), `actors` (up to the last 5 names), `project`, `task`, `title` (when it was written), `excerpt` (a comment's first 140 characters), `details` (`status: [from, to]`, `fields`, `tasks`, `week`, ...), `read`, `read_at`, `event_id` (the audit event that last touched it: also its sort order and the page cursor), `created_at`, `updated_at`.
+
+| `kind` | You are told when | `reason` |
+|---|---|---|
+| `mention` | someone `@mentions` you in a comment | `mentioned` |
+| `assigned` | a task is assigned to you (creating it, or changing the assignee) | `assigned` |
+| `timesheet` | your [timesheet](#timesheets) is approved, sent back or reopened | `owner` |
+| `status_changed` | a task you watch changes status (a project you watch at level `important`: only to `done` or `blocked`) | `watching` / `project` |
+| `comment` | a task you watch gets a comment | `watching` / `project` |
+| `updated` | a task you watch is edited (any field but the assignee) | `watching` / `project` |
+| `task_created` | a task is created in a project you watch at level `all` | `project` |
+| `sprint` | a sprint starts or closes in a project you watch | `project` |
+| `project` | a project you watch changes status | `project` |
+
+### Who hears about an event
+
+* **Watching a task** happens on purpose (`PUT .../watch`, `source: "manual"`) or because of what you did: you created it, it was assigned to you, you commented on it, you were mentioned in it (`source: "auto"`). A task you never touched and did not choose is silent. **Ignoring** silences everything about the task except being mentioned - also what a project watch would bring - and stays in force when you later act on the task. `DELETE .../watch` removes your choice, and the default applies again.
+* **Watching a project** is `all` (everything above for every task in it) or `important` (assignments, mentions, status changes to `done` or `blocked`, sprints and project status).
+* **Never the person who did it**, unless their `self_notify` setting is on. Deactivated people hear nothing. A kind switched off in your settings is not delivered.
+* **At most once per event and person**, as the most important reason that applies (order of the table above: a mention beats watching). One event reaches at most 500 people.
+* Deleting a task removes watches on it; items about it stay, keeping the task key.
+
+### Merging and limits
+
+* Comments, status changes and edits **on the same task**, and tasks **created in the same project**, merge into one *unread* item while it is less than 10 minutes old: `count` goes up, `text` becomes "3 new comments on ...", a status change shows the first "from" and the latest "to", edits list every field. Assignments made by the same person in the same project in the same second (a template, an import) become one item listing up to five task keys. Mentions, other assignments, decisions, sprints and project changes are never merged. Once an item is read, the next event starts a new one.
+* **Bounded:** read items are forgotten after 30 days, and nobody keeps more than 500 items (read ones go first, then the oldest). At most 1,000 watches per person (`409 watch_limit`).
+* **Safe:** a failure while creating notifications never fails the change that caused it (the partial work is rolled back and the error logged). Notifications are not audit events - they are a derived, personal view - so reading and changing an inbox is not recorded.
+
 ## Tasks
 
 | Endpoint | Role | Notes |
