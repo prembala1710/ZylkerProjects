@@ -450,4 +450,12 @@ def report_digest(ctx, req):
     return reports.digest(ctx, req.query)
 
 
-from . import search_routes, sprint_routes, template_routes, timesheet_routes, token_routes, webhook_routes  # noqa: E402,F401 - register their endpoints
+from . import (  # noqa: E402,F401 - register their endpoints
+    inbox_routes,
+    search_routes,
+    sprint_routes,
+    template_routes,
+    timesheet_routes,
+    token_routes,
+    webhook_routes,
+)
