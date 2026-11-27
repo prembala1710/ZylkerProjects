@@ -1,7 +1,7 @@
 # API reference
 
 Base path `/api`. JSON in, JSON out (`Content-Type: application/json`), except CSV import/export.
-Every endpoint except `GET /api/health` needs `Authorization: Bearer <token>`.
+Every endpoint except `GET /api/health` and the calendar feed address (`GET /api/calendar/{token}.ics`, see *Calendar feeds*) needs `Authorization: Bearer <token>`.
 
 *Role* is the minimum global role (`viewer` < `member` < `manager` < `admin`). Task-level writes by a `member`
 additionally require membership of the project (managers and admins can write anywhere). Archived projects are
@@ -114,3 +114,31 @@ estimate_hours assignee`, comma-separated, `-` prefix for descending; dates sort
 | `GET /api/reports/workload` | viewer | `?weeks=1..12` (default 2) `?project=`. Per person: scheduled hours vs capacity, utilisation, overallocation |
 | `GET /api/reports/timesheet` | viewer | `?from=&to=&project=&user=`. Members and viewers only ever see their own time; managers see everyone |
 | `GET /api/reports/digest` | viewer | `?days=0..30` (default 3) `?project=`. Overdue and due-soon tasks grouped by assignee |
+
+## Calendar feeds
+
+A feed is a private iCalendar address that puts a person's tasks, or one project's tasks and milestones, into Google Calendar,
+Outlook, Apple Calendar or anything else that can subscribe to a URL. Feeds belong to the user who created them: nobody else,
+administrators included, can list, replace or delete them. Setup and the rules of the feed itself are in the README.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/calendar/feeds` | viewer | Your feeds, plus `limits` (feeds allowed, days covered, events per feed). Never includes an address |
+| `POST /api/calendar/feeds` | viewer | `{scope: "mine"\|"project", project?, name?, include_done?, include_milestones?}`. `201` with the feed and its address (`token`, `path`, `url`) - **shown once**. `409 feed_limit` after 10 feeds |
+| `POST /api/calendar/feeds/{feed_id}/rotate` | viewer | Issues a new address (returned once) and invalidates the old one immediately; the fetch count starts again |
+| `DELETE /api/calendar/feeds/{feed_id}` | viewer | `204`. Somebody else's feed, an unknown id and a non-numeric id are all `404 feed_not_found` |
+| `GET /api/calendar/{token}.ics` | public | The subscription: `text/calendar`, no Authorization header - the address is the credential. `404 feed_not_found` for an unknown, replaced or deleted address and when its owner is deactivated |
+
+`scope` is `mine` (open tasks assigned to you, in every project that is not archived) or `project` (the open tasks of `project`, which is
+required, plus its milestones unless `include_milestones` is false). `include_done` adds finished tasks, marked with a check mark; cancelled tasks never
+appear. `name` (<= 60 characters) is how the calendar shows the feed and defaults to "My tasks" or the project's name. `include_milestones` is
+refused for `mine` feeds, and `project` is refused for anything but a project feed.
+
+A feed lists tasks that have a start or a due date, from 60 days ago to 365 days ahead, at most 5,000 of them. A task with both dates is one
+all-day event from start to due date; with one date it is a one-day event whose title ends in "(due)" or "(starts)". Events are marked as free
+time, so a due date does not make the day look busy. Each event carries the task key and title, the project, status, priority, the estimate, the
+assignee (project feeds only) and, when `ZYLKER_PUBLIC_URL` is set, a link back to the task - never descriptions, comments or logged time.
+The calendar asks to be refreshed hourly; calendar apps decide for themselves how often they really do.
+
+Every successful fetch adds one to `use_count` and sets `last_used_at`, so you can see that a subscription works. The address is never written to
+the access log, and creating, replacing and deleting a feed is recorded in `GET /api/activity` (without the address).

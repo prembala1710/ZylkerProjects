@@ -56,11 +56,15 @@ STATUS_TEXT = {
 
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_FEED_URL = re.compile(r"^(/api/calendar/)[^/]+(\.ics)$")
 
 
 def _loggable(text, limit=200):
-    """PATH_INFO arrives percent-decoded, so %0A would otherwise forge extra log lines."""
-    return _CONTROL.sub("?", str(text))[:limit]
+    """PATH_INFO arrives percent-decoded, so %0A would otherwise forge extra log lines.
+
+    A calendar feed address is a credential (see services/calendar_feeds.py), so it is replaced before it can reach a log.
+    """
+    return _CONTROL.sub("?", _FEED_URL.sub(r"\1<feed>\2", str(text)))[:limit]
 
 
 class Raw:
@@ -140,13 +144,15 @@ def route(method, pattern, role="viewer", public=False, body_limit=None):
 
 class App:
     def __init__(self, config: Config, clock=None, notifier=None):
-        from . import routes  # noqa: F401 - registers handlers
+        from . import calendar_routes, routes  # noqa: F401 - registers handlers
+        from .services import calendar_feeds
 
         config.validate()
         self.config = config
         self.tz = get_tz(config.timezone)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.notifier = notifier if notifier is not None else notify.build_notifier(config)
+        calendar_feeds.ensure_schema(config.db_path)  # additive table for databases created before calendar feeds existed
 
     # -- helpers shared by the CLI and tests -------------------------------------------
 
