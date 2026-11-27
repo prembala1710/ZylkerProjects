@@ -22,6 +22,8 @@ standard library alone - **no packages to install, no build step** - and stores 
 - **Roles and an audit trail** - viewer / member / manager / admin, per-project membership, and a field-level history of every change.
 - **Zoho Cliq notifications** (optional) - assignments, completions, blockers, @mentions and a scheduled overdue digest.
 - **CSV import / export** - bring in a Jira-style export (with a dry run) or take your data out.
+- **Calendar feeds** - a private link that puts your tasks, or a project's tasks and milestones, into Google Calendar, Outlook or
+  Apple Calendar (see [Calendar feeds](#calendar-feeds)).
 
 ## Quick start
 
@@ -60,7 +62,7 @@ All settings are environment variables; nothing is read from the repository.
 | `ZYLKER_HOST` | `127.0.0.1` | Listen address. Anything other than loopback prints a warning: put a TLS-terminating reverse proxy in front |
 | `ZYLKER_PORT` | `8080` | Listen port |
 | `ZYLKER_TIMEZONE` | `UTC` | IANA name, e.g. `Asia/Kolkata`. Decides what "today" is for overdue checks, digests and burndown days. Timestamps are always stored in UTC |
-| `ZYLKER_PUBLIC_URL` | *(empty)* | Public base URL (`https://pm.example.com`); makes task keys in Cliq messages clickable |
+| `ZYLKER_PUBLIC_URL` | *(empty)* | Public base URL (`https://pm.example.com`); makes task keys in Cliq messages clickable and completes the address of calendar feeds |
 | `ZYLKER_CLIQ_ENDPOINT` | *(empty = notifications off)* | A Cliq **incoming webhook URL**. It contains a key - treat it as a secret. Must be `https` (plain `http` only for localhost) |
 | `ZYLKER_CLIQ_BOT_UNIQUE_NAME` | *(empty)* | Post as this bot (appended as `bot_unique_name`, the same convention as the repository's GitHub Informer workflow) |
 
@@ -141,6 +143,34 @@ Task titles are stripped of Cliq markup before posting, so a title cannot inject
 Delivery is covered by tests against a local stand-in server, **not** against live Cliq: after configuring, run
 `zylker-pm digest --post` once and check the channel.
 
+## Calendar feeds
+
+A calendar feed puts your tasks next to your meetings. It is a private link that Google Calendar, Outlook, Apple Calendar and most other
+calendar apps can subscribe to.
+
+1. Open **Calendar** in the sidebar and press **+ New feed**. Choose *My tasks* (the open tasks assigned to you, from every project that is
+   not archived) or *The tasks of a project* (every dated open task plus the project's milestones).
+2. Copy the link - it is shown **once** - and add it in your calendar app. Google Calendar: *Other calendars -> From URL*. Outlook:
+   *Add calendar -> Subscribe from web*. Apple Calendar: *File -> New Calendar Subscription*.
+
+**What a feed shows.** Tasks that have a start or a due date, from 60 days ago to a year ahead (at most 5,000). A task with both dates is one
+all-day event from the start to the due date; a task with one date is a one-day event whose title ends in "(due)" or "(starts)". Events are
+marked as free time, so a due date does not make the day look busy. Each one carries the task key and title, the project, status, priority,
+estimate, the assignee (project feeds) and, when `ZYLKER_PUBLIC_URL` is set, a link to the task. Descriptions, comments, logged time and
+other people's details are never included. Finished tasks appear only if you ask for them (with a check mark); cancelled tasks never do.
+
+**How fresh it is.** The feed is built from the live data on every fetch, but the calendar app decides when to fetch - usually every few hours,
+sometimes much less often. The Calendar page shows when each feed was last fetched, which is the quickest way to tell that a subscription works.
+
+**Keeping the link private.** Calendar apps cannot send a token, so the link itself is the credential: anyone who has it can read the feed (titles and
+dates, nothing more), and it cannot be limited to one device. Only a SHA-256 hash is stored, so a link that was not copied cannot be shown again: use
+**New link** to replace it, and the old one stops working at once. Deleting the feed, deactivating its owner or deleting its project ends it too, and
+the link never appears in the server's own access log (a reverse proxy in front of it keeps a log of its own: leave `/api/calendar/` out of that one too). Serve it over HTTPS, because it is a credential, and set `ZYLKER_PUBLIC_URL` so it is complete. Hosted
+calendars such as Google Calendar fetch the link from their own servers, so the address has to be reachable from the internet; a server on localhost or a
+private network only works with calendar apps on a machine that can reach it.
+
+Each person can have 10 feeds. Feeds are managed by their owner only; nobody else, administrators included, can see or change them.
+
 ## CSV import and export
 
 Export: **List -> Export CSV** (or `GET /api/projects/KEY/export.csv`). Cells that start with `= + - @` are prefixed with `'` so a
@@ -186,6 +216,9 @@ Unknown assignees are left unassigned with a warning. Subtask/parent links and m
   no inline scripts or styles, no external resources, no framing - so stored text cannot become markup. A browser test submits
   `<script>`/`<img onerror>` payloads in titles, descriptions, comments and project names and checks that none executes.
 - Static files are served from a fixed whitelist of three paths; there is no filesystem lookup from the URL.
+- A calendar feed address is a bearer credential like a token: 256 random bits, stored only as a SHA-256 hash, shown once, replaceable, dead when
+  its owner is deactivated, and replaced by `<feed>` in the access log. It can read titles and dates and nothing else, and it is the one URL that works without
+  an `Authorization` header.
 - **Not covered:** single sign-on (Zoho or otherwise), token expiry, failed-login throttling (tokens are unguessable, but throttle at
   the proxy anyway), e-mail notifications, per-project read restrictions (every signed-in user can read every project), file attachments.
 
@@ -213,7 +246,7 @@ tests/                 unit, HTTP, CLI and browser tests
 ## Limitations and ideas for later
 
 Dependencies are finish-to-start and within one project; there are no custom fields, recurring tasks, task templates or
-attachments; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; SSO and per-project read
+attachments; the burndown does not remember reopened tasks; the timeline draws no dependency arrows; calendar feeds are read-only and all-day (no times, reminders or filters by label); SSO and per-project read
 permissions would be the natural next steps for a larger organisation.
 
 *The files `anand` and `test.ds` at the repository root are pre-existing test artefacts and are not part of the application.*

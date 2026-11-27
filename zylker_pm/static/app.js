@@ -259,6 +259,7 @@ function renderShell() {
     h('a', { class: 'nav-link', href: '#/dashboard', dataset: { route: 'dashboard' } }, 'Dashboard'),
     h('a', { class: 'nav-link', href: '#/mine', dataset: { route: 'mine' } }, 'My tasks'),
     h('a', { class: 'nav-link', href: '#/team', dataset: { route: 'team' } }, 'Team workload'),
+    h('a', { class: 'nav-link', href: '#/calendar', dataset: { route: 'calendar' } }, 'Calendar'),
     h('div', { class: 'nav-heading', text: 'Projects' }),
     h('div', { id: 'project-nav' }),
     hasRole('manager') ? h('button', { class: 'btn small', style: { margin: '8px 10px' }, onclick: openCreateProject }, '+ New project') : null,
@@ -299,6 +300,7 @@ async function route() {
     else if (a === 't' && b) { state.pendingTask = b.toUpperCase(); const t = await api('/tasks/' + state.pendingTask); location.replace('#/p/' + t.project + '/board'); }
     else if (a === 'mine') await myTasksView(view, alive);
     else if (a === 'team') await teamView(view, alive);
+    else if (a === 'calendar') await calendarView(view, alive);
     else if (a === 'users' && hasRole('admin')) await usersView(view, alive);
     else await dashboardView(view, alive);
   } catch (e) {
@@ -1015,6 +1017,84 @@ function openCreateUser() {
     m.close(); state.users = (await api('/users')).items; showToken(r.user.username, r.token); route();
   }) }, 'Create user');
   const m = openModal({ title: 'New user', narrow: true, content: h('div', { class: 'stack' }, field('Username', f.username), field('Display name', f.display_name), field('E-mail (optional)', f.email), h('div', { class: 'form-grid' }, field('Role', f.role), field('Weekly capacity (h)', f.weekly_capacity_hours))), footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), create] });
+}
+
+/* ============================== calendar feeds ============================== */
+const feedShows = (f) => (f.scope === 'mine' ? 'Open tasks assigned to you' : 'Project ' + f.project + ': tasks' + (f.include_milestones ? ' and milestones' : '')) + (f.include_done ? ', finished tasks included' : '');
+const fetchCount = (n) => n + (n === 1 ? ' fetch' : ' fetches');
+
+async function calendarView(view, alive) {
+  const data = await api('/calendar/feeds');
+  if (!alive()) return;
+  clear(view);
+  const full = data.items.length >= data.limits.max_feeds;
+  const rows = data.items.map((f) => h('tr', { dataset: { feed: f.id } },
+    h('td', {}, h('strong', { text: f.name }), h('div', { class: 'small muted', text: feedShows(f) })),
+    h('td', {}, f.last_used_at ? h('span', { title: f.last_used_at }, fmtAgo(f.last_used_at) + ' \u00b7 ' + fetchCount(f.use_count)) : h('span', { class: 'muted', text: 'Never fetched' })),
+    h('td', { class: 'right nowrap' },
+      h('button', { class: 'btn small', onclick: (e) => guarded(e.target, async () => {
+        if (!(await confirmBox('Replace the link of \u201c' + f.name + '\u201d? The old link stops working immediately, so every calendar that uses it has to subscribe again.', 'Replace link'))) return;
+        const issued = await api('/calendar/feeds/' + f.id + '/rotate', { method: 'POST' });
+        showFeedLink(issued, 'New link for ' + f.name);
+        route();
+      }) }, 'New link'), ' ',
+      h('button', { class: 'btn small danger', onclick: (e) => guarded(e.target, async () => {
+        if (!(await confirmBox('Delete \u201c' + f.name + '\u201d? Calendars that use its link will stop updating.', 'Delete', true))) return;
+        await api('/calendar/feeds/' + f.id, { method: 'DELETE' });
+        toast('Feed deleted', 'ok');
+        route();
+      }) }, 'Delete'))));
+  view.append(h('div', { class: 'page-head' },
+    h('div', { class: 'titles' }, h('h1', { text: 'Calendar feeds' }),
+      h('p', { class: 'muted', text: 'Show your tasks in Google Calendar, Outlook or Apple Calendar. Each feed is a private link: anyone who has it can see the titles and dates it covers, from '
+        + data.limits.past_days + ' days back to ' + data.limits.future_days + ' days ahead. Keep it to yourself.' })),
+    h('button', { class: 'btn primary', id: 'new-feed', disabled: full, title: full ? 'You already have ' + data.limits.max_feeds + ' feeds' : null, onclick: openCreateFeed }, '+ New feed')),
+    rows.length
+      ? h('div', { class: 'card flush' }, h('table', { class: 'table' }, h('thead', {}, h('tr', {}, ['Feed', 'Last fetched', ''].map((x) => h('th', { text: x })))), h('tbody', {}, rows)))
+      : h('div', { class: 'card empty' }, h('h2', { text: 'No calendar feeds yet' }), h('p', { text: 'Create one to see your due dates next to your meetings.' })));
+}
+
+function openCreateFeed() {
+  const hasProjects = state.projects.length > 0;
+  const f = {
+    scope: h('select', { 'aria-label': 'What to show' }, optionList(hasProjects ? [['mine', 'My tasks'], ['project', 'The tasks of a project']] : [['mine', 'My tasks']])),
+    project: h('select', { 'aria-label': 'Project' }, optionList(state.projects.map((p) => [p.key, p.key + ' \u00b7 ' + p.name]))),
+    name: h('input', { type: 'text', maxlength: 60, placeholder: 'Optional \u2014 the calendar\u2019s name in your app' }),
+    done: h('input', { type: 'checkbox', id: 'feed-done' }),
+    milestones: h('input', { type: 'checkbox', id: 'feed-milestones', checked: true }),
+  };
+  const projectField = field('Project', f.project);
+  const milestoneRow = h('label', { class: 'row small' }, f.milestones, 'Include the project\u2019s milestones');
+  const sync = () => { const project = f.scope.value === 'project'; projectField.classList.toggle('hidden', !project); milestoneRow.classList.toggle('hidden', !project); };
+  f.scope.addEventListener('change', sync);
+  sync();
+  const create = h('button', { class: 'btn primary', onclick: () => guarded(create, async () => {
+    const body = { scope: f.scope.value, include_done: f.done.checked };
+    if (f.name.value.trim()) body.name = f.name.value.trim();
+    if (body.scope === 'project') { body.project = f.project.value; body.include_milestones = f.milestones.checked; }
+    const issued = await api('/calendar/feeds', { method: 'POST', body });
+    m.close();
+    showFeedLink(issued, 'Your calendar link');
+    route();
+  }) }, 'Create feed');
+  const m = openModal({ title: 'New calendar feed', narrow: true, content: h('div', { class: 'stack' }, field('Show', f.scope), projectField, field('Name', f.name),
+    h('label', { class: 'row small' }, f.done, 'Include finished tasks'), milestoneRow),
+    footer: [h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), create] });
+}
+
+function showFeedLink(feed, title) {
+  const link = feed.url || location.origin + feed.path;
+  const local = !feed.url && ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  const m = openModal({ title, narrow: true, content: h('div', { class: 'stack' },
+    h('p', { text: 'Copy this link now \u2014 it will not be shown again. Anyone who has it can see the titles and dates in this feed.' }),
+    h('div', { class: 'token-box', id: 'feed-link', text: link }),
+    h('button', { class: 'btn', onclick: async (e) => { try { await navigator.clipboard.writeText(link); e.target.textContent = 'Copied \u2713'; } catch (err) { toast('Select the link and copy it manually', 'error'); } } }, 'Copy to clipboard'),
+    local ? h('p', { class: 'feed-note', id: 'feed-local', text: 'This address only works on this computer. Calendar services such as Google Calendar cannot reach it: ask an admin to set ZYLKER_PUBLIC_URL.' }) : null,
+    h('ul', { class: 'howto small muted' },
+      h('li', {}, h('strong', { text: 'Google Calendar: ' }), 'Other calendars \u2192 From URL.'),
+      h('li', {}, h('strong', { text: 'Outlook: ' }), 'Add calendar \u2192 Subscribe from web.'),
+      h('li', {}, h('strong', { text: 'Apple Calendar: ' }), 'File \u2192 New Calendar Subscription.'))),
+    footer: [h('button', { class: 'btn primary', onclick: () => m.close() }, 'Done')] });
 }
 
 /* ============================== boot ============================== */
